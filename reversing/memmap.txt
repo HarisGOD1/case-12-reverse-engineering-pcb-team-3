@@ -1,0 +1,13 @@
+Program: backup_full.bin
+Language: ARM:LE:32:Cortex
+ImageBase: 00000000
+MinAddress: 10000000
+MaxAddress: 101fffff
+
+=== MEMORY BLOCKS ===
+BLOCK|ram|start=10000000|end=101fffff|size=0x200000|init=true|R=true W=true X=true|volatile=false|type=Default
+TOTAL_INITIALIZED_BYTES=0x200000
+
+EXPORT minAddr=10000000 maxAddr=101fffff
+COPIED|ram|off=0x0|len=0x200000|got=0x200000
+WROTE /tmp/opencode/memory_full.bin size=0x200000
