@@ -1,0 +1,32 @@
+Пример воспроизведения атаки (вход — полный дамп флеша backup_full.bin, 2 МБ)
+
+### 1) Расшифровка дампа
+$ python3 decrypt_storage.py backup_full.bin storage_decrypted.img
+sector 0 : eb 3c 90 4d 53 44 4f 53 35 2e 30 00 02 01 04 00
+OEM name : MSDOS5.0
+boot sig : 55 aa (expect 55 aa)
+written  : storage_decrypted.img 720896 bytes
+
+### 2) Первые 32 байта расшифрованного сектора 0 (загрузочный сектор FAT)
+0000  eb 3c 90 4d 53 44 4f 53 35 2e 30 00 02 01 04 00  .<.MSDOS5.0.....
+0010  02 00 02 00 08 f8 06 00 01 00 01 00 00 00 00 00  ................
+boot sig @1fe: 55 aa
+
+### 3) file(1) на расшифрованном образе
+storage_decrypted.img: DOS/MBR boot sector, code offset 0x3c+2, OEM-ID "MSDOS5.0",
+reserved sectors 4, root entries 512, sectors 2048 (volumes <=32 MB),
+Media descriptor 0xf8, sectors/FAT 6, sectors/track 1, heads 1, FAT (12 bit)
+
+### 4) Листинг файловой системы (mtools)
+$ MTOOLS_SKIP_CHECK=1 mdir -i storage_decrypted.img -/ ::
+ Volume in drive : has no label
+Directory for ::/
+
+YOUR_P~1 ZIP    691868 2026-07-24  11:43  your_prize.zip
+        1 file              691 868 bytes
+
+Directory for ::/System Volume Information
+WPSETT~1 DAT        12 2026-07-24  14:28  WPSettings.dat
+INDEXE~1            76 2026-07-24  14:28  IndexerVolumeGuid
+
+Итог: 704-КБ хранилище расшифровано без устройства, PIN и энкодера — только из дампа.
