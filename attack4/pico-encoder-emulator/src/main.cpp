@@ -83,7 +83,7 @@ static int RESET_AFTER_ATTEMPT = 0;
 // up, slow down (EDGE_US / DETENT_GAP_US are the ones that matter).
 // These are the original conservative (bounce-safe) values -- fast-sweep
 // experiments dropped edges, so we are back to the reliable baseline.
-static uint32_t EDGE_US = 3000;			 // between quadrature edges
+static uint32_t EDGE_US = 10000;		 // between quadrature edges (10 ms/edge)
 static uint32_t DETENT_GAP_US = 6000;	 // after each 1-digit detent
 static uint32_t PRESS_US = 40000;		 // button held low
 static uint32_t RELEASE_US = 60000;		 // button released before next act
