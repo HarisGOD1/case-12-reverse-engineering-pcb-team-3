@@ -69,13 +69,12 @@ static int INITIAL_VALUE = 0;
 
 // Value the display returns to after a press (start of the next digit).
 //   -1 = display carries over (keep tracking); 0..9 = it resets to that value.
-// This safe CARRIES the digit over: pressing the button does NOT reset the
-// display to 0, the next digit is dialled from the current one. Confirmed on the
-// bench (an earlier read of board_gpio_init suggested a reset -- that was wrong).
-static int RESET_AFTER_PRESS = -1;
+// This safe RESETS the display to 0 after each confirm (bench-confirmed), so 0.
+// pressRaw() applies this to g_believed, so every digit is dialled from 0.
+static int RESET_AFTER_PRESS = 0;
 // Value the display returns to after a full (rejected) 4-digit attempt.
-//   -1 = carries over; 0..9 = resets to that value. Set on the bench.
-static int RESET_AFTER_ATTEMPT = -1;
+//   -1 = carries over; 0..9 = resets to that value. Bench: resets to 0.
+static int RESET_AFTER_ATTEMPT = 0;
 
 // --------------------------------- Timing ----------------------------------
 // Microseconds. All are divided by (g_speedPct/100): higher percent = faster.
@@ -299,6 +298,9 @@ static void pressRaw(long dtMs)
 		waitUs(PRESS_US);
 	setLine(PIN_SW, 1);
 	waitUs(RELEASE_US);
+	// The safe resets its display to 0 on confirm, so track that.
+	if (RESET_AFTER_PRESS >= 0)
+		g_believed = RESET_AFTER_PRESS;
 }
 
 
@@ -435,7 +437,7 @@ static long thinkTimeOf(int d0, int d1, int d2, int d3)
 	for (int i = 0; i < 3; i++) // first three digits (carry: dial from current)
 	{
 		enterDigit(d[i]); // shortest-path from g_believed; updates g_believed
-		pressRaw(-1);	  // press does NOT reset the display -> believed carries
+		pressRaw(-1);	  // confirm; pressRaw resets g_believed to 0
 		waitUs(DIGIT_GAP_US);
 	}
 	enterDigit(d[3]); // fourth digit triggers the check
@@ -452,7 +454,7 @@ static bool doAttempt(int d0, int d1, int d2, int d3)
 	for (int i = 0; i < 4; i++)
 	{
 		enterDigit(d[i]); // carry: shortest-path from current; updates g_believed
-		pressRaw(-1);	  // press does NOT reset the display
+		pressRaw(-1);	  // confirm; pressRaw resets g_believed to 0
 		if (i < 3)
 			waitUs(DIGIT_GAP_US);
 	}
