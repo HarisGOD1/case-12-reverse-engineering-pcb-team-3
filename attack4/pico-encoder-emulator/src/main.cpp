@@ -55,14 +55,16 @@ static const uint8_t STATUS_LED = LED_BUILTIN; // on-board LED: lit while runnin
 // Everything below is a guess until measured on the bench in jog mode ('u'/'d'
 // step the display, 'p' presses). Adjust, re-flash or set live where noted.
 
-// Quadrature quarter-steps (single-edge transitions) needed to move the shown
-// digit by 1. A detented encoder emits 4 edges/detent and firmware usually
-// divides by 4 -> 4 here. If one jog step moves the display by more/less than 1,
-// change this. Live-settable with 'q<n>'.
-static int QUARTERS_PER_STEP = 4;
+// Quadrature transitions (single edges) needed to move the shown digit by 1.
+// THIS SAFE uses a full 4x decoder: its IRQ handler adds +/-1 on EVERY valid A/B
+// transition (transition table at 0x100054f0), so ONE edge == one digit. Hence 1
+// here, not 4. (Verified by disassembling the encoder IRQ callback at 0x10000944.)
+// Live-settable with 'q<n>'.
+static int QUARTERS_PER_STEP = 1;
 
 // Set true if turning "up" makes the display count DOWN. Live-toggle with 'i'.
-static bool INVERT_DIR = false;
+// Our Gray order yields -1 per edge in this decoder's table, so invert to get +1.
+static bool INVERT_DIR = true;
 
 // Digit shown by the target when the *very first* attempt begins (power-on).
 static int INITIAL_VALUE = 0;
