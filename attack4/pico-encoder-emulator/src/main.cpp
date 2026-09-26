@@ -136,10 +136,6 @@ static uint32_t READY_QUIET_MS = 350; // this much no-edge time == target idle
 // push input into a busy safe. This cap is huge on purpose (effectively "wait as
 // long as it takes"); a 's'/'S' byte on the console aborts the wait.
 static uint32_t READY_TIMEOUT_MS = 120000;
-// Shorter idle wait between digits of one attempt (the target is only briefly busy
-// confirming a digit, no reject animation there).
-static uint32_t DIGIT_QUIET_MS = 120;
-static uint32_t DIGIT_READY_TIMEOUT_MS = 800;
 
 // --------------------------------- Speed -----------------------------------
 // THE speed knob. Overall sweep-rate multiplier applied to every timing above
@@ -390,31 +386,29 @@ static long pressMeasureFreeze()
 static long thinkTimeOf(int d0, int d1, int d2, int d3)
 {
 	const int d[4] = {d0, d1, d2, d3};
-	// Make sure the safe is idle (previous reject blink over) before we start,
-	// or the leading digits are fed into a busy target and get lost.
+	// Wait until the safe is idle before starting: after a rejected attempt it
+	// plays the ~1.2 s reject blink on GPIO10 and drops input fed during it.
+	// Once that blink ends the safe returns to position 0 and GPIO10 goes quiet
+	// (a different position LED blinks), so "SENSE quiet" == ready HERE.
+	// NB: only valid between attempts. Between digits GPIO10 blinks as the
+	// position-4 indicator, so we must NOT wait on SENSE mid-attempt -- a fixed
+	// gap is used there instead.
 	waitTargetReady(READY_QUIET_MS, READY_TIMEOUT_MS);
+	waitUs(200000); // small settle margin after the safe reports ready
 	for (int i = 0; i < 3; i++) // first three digits: ordinary confirm
 	{
 		enterDigit(d[i]);
 		press();
 		if (RESET_AFTER_PRESS >= 0)
 			g_believed = RESET_AFTER_PRESS;
-		// Wait for the digit-confirm activity to settle, else the next digit's
-		// first steps land while the target is still busy. Falls back to the
-		// fixed gap when SENSE is off.
-		if (!waitTargetReady(DIGIT_QUIET_MS, DIGIT_READY_TIMEOUT_MS))
-			waitUs(DIGIT_GAP_US);
+		waitUs(DIGIT_GAP_US); // fixed gap: GPIO10 blinks by position here
 	}
 	enterDigit(d[3]); // fourth digit triggers the check
 	long freeze = pressMeasureFreeze();
-	// Wait on SENSE for the reject blink to drain (target ready again) instead of
-	// a blind delay; fall back to a fixed wait if SENSE gave no signal.
-	if (!waitTargetReady(READY_QUIET_MS, READY_TIMEOUT_MS))
-		waitUs((ORACLE_WINDOW_MS + 1400u) * 1000u - PRESS_US);
 	if (RESET_AFTER_ATTEMPT >= 0)
 		g_believed = RESET_AFTER_ATTEMPT;
 	else
-		g_believed = INITIAL_VALUE; // reject animation reset the display
+		g_believed = INITIAL_VALUE; // reject animation resets the display
 	return freeze;
 }
 
