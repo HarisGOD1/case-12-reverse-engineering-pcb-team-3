@@ -127,8 +127,11 @@ static uint32_t SENSE_SAMPLE_US = 50;
 // blink and ignores input; feeding it digits then loses the leading steps. So we
 // wait on SENSE for the target to go quiet (blink over -> ready) before the next
 // action, instead of a blind delay. Ready = no SENSE edge for READY_QUIET_MS.
-static uint32_t READY_QUIET_MS = 350;	  // this much no-edge time == target idle
-static uint32_t READY_TIMEOUT_MS = 3000; // give up waiting after this (safety cap)
+static uint32_t READY_QUIET_MS = 350; // this much no-edge time == target idle
+// With SENSE on we would rather block until the target is actually ready than
+// push input into a busy safe. This cap is huge on purpose (effectively "wait as
+// long as it takes"); a 's'/'S' byte on the console aborts the wait.
+static uint32_t READY_TIMEOUT_MS = 120000;
 // Shorter idle wait between digits of one attempt (the target is only briefly busy
 // confirming a digit, no reject animation there).
 static uint32_t DIGIT_QUIET_MS = 120;
@@ -347,6 +350,11 @@ static bool waitTargetReady(uint32_t quietMs, uint32_t timeoutMs)
 		uint32_t now = millis();
 		if (now - t0 >= timeoutMs)
 			return false;
+		if (Serial.available() && (Serial.peek() == 's' || Serial.peek() == 'S'))
+		{
+			Serial.read(); // let the operator break a stuck wait
+			return false;
+		}
 		int v = digitalRead(PIN_SENSE);
 		if (v != last)
 		{
@@ -486,8 +494,10 @@ static long readNumberArg()
 	long v = 0;
 	bool got = false;
 	unsigned long t0 = millis();
-	while (millis() - t0 < 50)
-	{ // brief window for the digits to arrive
+	// Wide window so a human can type the number after the command letter in a
+	// raw terminal (chars arrive one by one); each digit re-arms the window.
+	while (millis() - t0 < 1200)
+	{ // window for the digits to arrive
 		while (Serial.available())
 		{
 			int c = Serial.peek();
