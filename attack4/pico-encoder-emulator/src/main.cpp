@@ -68,9 +68,13 @@ static int INITIAL_VALUE = 0;
 
 // Value the display returns to after a press (start of the next digit).
 //   -1 = display carries over (keep tracking); 0..9 = it resets to that value.
-static int RESET_AFTER_PRESS = -1;
-// Value the display returns to after a full (rejected) 4-digit attempt.
-static int RESET_AFTER_ATTEMPT = -1;
+// This safe resets to 0: board_gpio_init shows the next position's byte from the
+// zeroed digit buffer after each confirm, so every digit starts from 0. Verified
+// in reversing/program_decompiled.c (FUN_10000ab0).
+static int RESET_AFTER_PRESS = 0;
+// Value the display returns to after a full (rejected) 4-digit attempt. The
+// reject path zeroes the digit buffer and restarts at position 0, so 0.
+static int RESET_AFTER_ATTEMPT = 0;
 
 // --------------------------------- Timing ----------------------------------
 // Microseconds. All are divided by (g_speedPct/100): higher percent = faster.
