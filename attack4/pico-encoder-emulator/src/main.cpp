@@ -69,13 +69,13 @@ static int INITIAL_VALUE = 0;
 
 // Value the display returns to after a press (start of the next digit).
 //   -1 = display carries over (keep tracking); 0..9 = it resets to that value.
-// This safe resets to 0: board_gpio_init shows the next position's byte from the
-// zeroed digit buffer after each confirm, so every digit starts from 0. Verified
-// in reversing/program_decompiled.c (FUN_10000ab0).
-static int RESET_AFTER_PRESS = 0;
-// Value the display returns to after a full (rejected) 4-digit attempt. The
-// reject path zeroes the digit buffer and restarts at position 0, so 0.
-static int RESET_AFTER_ATTEMPT = 0;
+// This safe CARRIES the digit over: pressing the button does NOT reset the
+// display to 0, the next digit is dialled from the current one. Confirmed on the
+// bench (an earlier read of board_gpio_init suggested a reset -- that was wrong).
+static int RESET_AFTER_PRESS = -1;
+// Value the display returns to after a full (rejected) 4-digit attempt.
+//   -1 = carries over; 0..9 = resets to that value. Set on the bench.
+static int RESET_AFTER_ATTEMPT = -1;
 
 // --------------------------------- Timing ----------------------------------
 // Microseconds. All are divided by (g_speedPct/100): higher percent = faster.
@@ -301,16 +301,6 @@ static void pressRaw(long dtMs)
 	waitUs(RELEASE_US);
 }
 
-// Enter one digit deterministically from a known 0: turn CW exactly `target`
-// detents (0..9). The safe resets its display to 0 after every confirm, so
-// entry always starts at 0 -- no shortest-path guesswork, no drift. dtMs is the
-// per-edge delay passed to stepRaw (<=0 -> EDGE_US). Assumes g_believed == 0.
-static void enterDigitFromZero(int target, long dtMs)
-{
-	for (int i = 0; i < target; i++)
-		stepRaw(+1, dtMs);
-	g_believed = target;
-}
 
 // True if the sense line has held the unlock level for a short debounce window.
 static bool senseUnlocked()
@@ -441,18 +431,17 @@ static long thinkTimeOf(int d0, int d1, int d2, int d3)
 	// position-4 indicator, so we must NOT wait on SENSE mid-attempt -- a fixed
 	// gap is used there instead.
 	waitTargetReady(READY_QUIET_MS, READY_TIMEOUT_MS);
-	waitUs(200000);								   // small settle margin after ready
-	g_believed = (RESET_AFTER_PRESS >= 0) ? RESET_AFTER_PRESS : 0; // safe at 0 now
-	for (int i = 0; i < 3; i++)					   // first three digits, from 0
+	waitUs(200000); // small settle margin after ready
+	for (int i = 0; i < 3; i++) // first three digits (carry: dial from current)
 	{
-		enterDigitFromZero(d[i], -1);
-		pressRaw(-1);
-		g_believed = (RESET_AFTER_PRESS >= 0) ? RESET_AFTER_PRESS : 0; // confirm -> 0
-		waitUs(DIGIT_GAP_US); // fixed gap: GPIO10 blinks by position here
+		enterDigit(d[i]); // shortest-path from g_believed; updates g_believed
+		pressRaw(-1);	  // press does NOT reset the display -> believed carries
+		waitUs(DIGIT_GAP_US);
 	}
-	enterDigitFromZero(d[3], -1); // fourth digit triggers the check
+	enterDigit(d[3]); // fourth digit triggers the check
 	long freeze = pressMeasureFreeze();
-	g_believed = (RESET_AFTER_ATTEMPT >= 0) ? RESET_AFTER_ATTEMPT : 0; // reject -> 0
+	if (RESET_AFTER_ATTEMPT >= 0)
+		g_believed = RESET_AFTER_ATTEMPT;
 	return freeze;
 }
 
@@ -460,18 +449,17 @@ static long thinkTimeOf(int d0, int d1, int d2, int d3)
 static bool doAttempt(int d0, int d1, int d2, int d3)
 {
 	const int d[4] = {d0, d1, d2, d3};
-	g_believed = (RESET_AFTER_PRESS >= 0) ? RESET_AFTER_PRESS : 0; // safe at 0
 	for (int i = 0; i < 4; i++)
 	{
-		enterDigitFromZero(d[i], -1);
-		pressRaw(-1);
-		g_believed = (RESET_AFTER_PRESS >= 0) ? RESET_AFTER_PRESS : 0; // confirm -> 0
+		enterDigit(d[i]); // carry: shortest-path from current; updates g_believed
+		pressRaw(-1);	  // press does NOT reset the display
 		if (i < 3)
 			waitUs(DIGIT_GAP_US);
 	}
 	waitUs(CHECK_US); // let the target evaluate (incl. oracle)
 	bool ok = senseUnlocked();
-	g_believed = (RESET_AFTER_ATTEMPT >= 0) ? RESET_AFTER_ATTEMPT : 0;
+	if (RESET_AFTER_ATTEMPT >= 0)
+		g_believed = RESET_AFTER_ATTEMPT;
 	return ok;
 }
 
