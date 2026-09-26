@@ -15,9 +15,9 @@
 //     GPIO 28 = push button SW      (falling-edge IRQ, confirm digit)
 //
 // WIRING (attacker Pico  ->  target). ONLY 3 signals + a common ground.
-//   Pico GP2  (A_OUT)  ->  target A line  (encoder pin A  / net of GPIO 29)
-//   Pico GP3  (B_OUT)  ->  target B line  (encoder pin B  / net of GPIO 27)
-//   Pico GP4  (SW_OUT) ->  target SW line (button pin     / net of GPIO 28)
+//   Pico GP4  (A_OUT)  ->  target A line  (encoder pin A  / net of GPIO 29)
+//   Pico GP2  (B_OUT)  ->  target B line  (encoder pin B  / net of GPIO 27)
+//   Pico GP3  (SW_OUT) ->  target SW line (button pin     / net of GPIO 28)
 //   Pico GND           ->  target GND     (RP2040 ground / debug-header GND)
 //   Pico GP5  (SENSE)  ->  a target output LED, for the timing oracle (off by
 //                          default; enable with 'e'). Best pick: GPIO 10 -- it
@@ -43,9 +43,10 @@
 #include <Arduino.h>
 
 // ----------------------------- Pin assignment ------------------------------
-static const uint8_t PIN_A = 2;				   // -> target encoder A (GPIO 29 net)
-static const uint8_t PIN_B = 3;				   // -> target encoder B (GPIO 27 net)
-static const uint8_t PIN_SW = 4;			   // -> target button SW (GPIO 28 net)
+// Matched to the bench wiring: GP4->GPIO29(A), GP2->GPIO27(B), GP3->GPIO28(SW).
+static const uint8_t PIN_A = 4;				   // -> target encoder A (GPIO 29 net)
+static const uint8_t PIN_B = 2;				   // -> target encoder B (GPIO 27 net)
+static const uint8_t PIN_SW = 3;			   // -> target button SW (GPIO 28 net)
 static const uint8_t PIN_SENSE = 5;			   // <- optional unlock indicator (input)
 static const uint8_t STATUS_LED = LED_BUILTIN; // on-board LED: lit while running
 											   // (PIN_LED is a core macro, don't reuse it)
