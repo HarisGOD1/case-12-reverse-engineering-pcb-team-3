@@ -265,6 +265,52 @@ static void press()
 	waitUs(RELEASE_US);
 }
 
+// --------------------------- Raw manual primitives -------------------------
+// Hand-drivable low-level actions with an explicit per-edge / hold delay in ms,
+// so the operator (or the host over serial) can dial the encoder one detent at a
+// time and match the safe's poll rate directly. dtMs <= 0 falls back to the
+// configured EDGE_US / PRESS_US. These ignore the shortest-path logic of
+// enterDigit(): one call == exactly one physical detent or one button press.
+
+// Turn the encoder one detent. dir > 0 = one digit up (CW), dir < 0 = down.
+static void stepRaw(int dir, long dtMs)
+{
+	int gdir = (dir >= 0) ? (INVERT_DIR ? -1 : +1) : (INVERT_DIR ? +1 : -1);
+	for (int k = 0; k < QUARTERS_PER_STEP; k++)
+	{
+		g_qidx = (uint8_t)((g_qidx + (gdir > 0 ? 1 : 3)) & 3);
+		applyQuadState(g_qidx);
+		if (dtMs > 0)
+			delay((uint32_t)dtMs); // per-edge delay: tune to the target poll rate
+		else
+			waitUs(EDGE_US);
+	}
+	g_believed = ((g_believed + (dir >= 0 ? 1 : 9)) % 10 + 10) % 10;
+}
+
+// Press and release the button, holding it for dtMs (or PRESS_US when dtMs<=0).
+static void pressRaw(long dtMs)
+{
+	setLine(PIN_SW, 0);
+	if (dtMs > 0)
+		delay((uint32_t)dtMs);
+	else
+		waitUs(PRESS_US);
+	setLine(PIN_SW, 1);
+	waitUs(RELEASE_US);
+}
+
+// Enter one digit deterministically from a known 0: turn CW exactly `target`
+// detents (0..9). The safe resets its display to 0 after every confirm, so
+// entry always starts at 0 -- no shortest-path guesswork, no drift. dtMs is the
+// per-edge delay passed to stepRaw (<=0 -> EDGE_US). Assumes g_believed == 0.
+static void enterDigitFromZero(int target, long dtMs)
+{
+	for (int i = 0; i < target; i++)
+		stepRaw(+1, dtMs);
+	g_believed = target;
+}
+
 // True if the sense line has held the unlock level for a short debounce window.
 static bool senseUnlocked()
 {
@@ -394,21 +440,18 @@ static long thinkTimeOf(int d0, int d1, int d2, int d3)
 	// position-4 indicator, so we must NOT wait on SENSE mid-attempt -- a fixed
 	// gap is used there instead.
 	waitTargetReady(READY_QUIET_MS, READY_TIMEOUT_MS);
-	waitUs(200000); // small settle margin after the safe reports ready
-	for (int i = 0; i < 3; i++) // first three digits: ordinary confirm
+	waitUs(200000);								   // small settle margin after ready
+	g_believed = (RESET_AFTER_PRESS >= 0) ? RESET_AFTER_PRESS : 0; // safe at 0 now
+	for (int i = 0; i < 3; i++)					   // first three digits, from 0
 	{
-		enterDigit(d[i]);
-		press();
-		if (RESET_AFTER_PRESS >= 0)
-			g_believed = RESET_AFTER_PRESS;
+		enterDigitFromZero(d[i], -1);
+		pressRaw(-1);
+		g_believed = (RESET_AFTER_PRESS >= 0) ? RESET_AFTER_PRESS : 0; // confirm -> 0
 		waitUs(DIGIT_GAP_US); // fixed gap: GPIO10 blinks by position here
 	}
-	enterDigit(d[3]); // fourth digit triggers the check
+	enterDigitFromZero(d[3], -1); // fourth digit triggers the check
 	long freeze = pressMeasureFreeze();
-	if (RESET_AFTER_ATTEMPT >= 0)
-		g_believed = RESET_AFTER_ATTEMPT;
-	else
-		g_believed = INITIAL_VALUE; // reject animation resets the display
+	g_believed = (RESET_AFTER_ATTEMPT >= 0) ? RESET_AFTER_ATTEMPT : 0; // reject -> 0
 	return freeze;
 }
 
@@ -416,19 +459,18 @@ static long thinkTimeOf(int d0, int d1, int d2, int d3)
 static bool doAttempt(int d0, int d1, int d2, int d3)
 {
 	const int d[4] = {d0, d1, d2, d3};
+	g_believed = (RESET_AFTER_PRESS >= 0) ? RESET_AFTER_PRESS : 0; // safe at 0
 	for (int i = 0; i < 4; i++)
 	{
-		enterDigit(d[i]);
-		press();
-		if (i < 3 && RESET_AFTER_PRESS >= 0)
-			g_believed = RESET_AFTER_PRESS;
+		enterDigitFromZero(d[i], -1);
+		pressRaw(-1);
+		g_believed = (RESET_AFTER_PRESS >= 0) ? RESET_AFTER_PRESS : 0; // confirm -> 0
 		if (i < 3)
 			waitUs(DIGIT_GAP_US);
 	}
 	waitUs(CHECK_US); // let the target evaluate (incl. oracle)
 	bool ok = senseUnlocked();
-	if (RESET_AFTER_ATTEMPT >= 0)
-		g_believed = RESET_AFTER_ATTEMPT;
+	g_believed = (RESET_AFTER_ATTEMPT >= 0) ? RESET_AFTER_ATTEMPT : 0;
 	return ok;
 }
 
@@ -464,7 +506,8 @@ static void printHelp()
 	Serial.println(F("\r\n=== encoder emulator (attack4) ==="));
 	Serial.println(F("Jog / calibration:"));
 	Serial.println(F("  u  step display up 1     d  step display down 1"));
-	Serial.println(F("  p  press button once     z  declare current display = 0"));
+	Serial.println(F("  .  raw turn CW 1  (.<ms> per-edge delay)   , raw turn CCW 1"));
+	Serial.println(F("  p  press button   (p<ms> hold)   z  declare current display = 0"));
 	Serial.println(F("  q<n> quarter-steps per digit (e.g. q4)"));
 	Serial.println(F("  i  toggle direction invert"));
 	Serial.println(F("Brute-force:"));
@@ -709,9 +752,28 @@ static void handleChar(int c)
 		Serial.printf("[jog] down -> believed=%d\r\n", g_believed);
 		break;
 	case 'p':
-		press();
-		Serial.println(F("[jog] press"));
-		break;
+	{
+		long n = readNumberArg();
+		pressRaw(n);
+		Serial.printf("[raw] press (hold %ldms)\r\n", n > 0 ? n : (long)(PRESS_US / 1000));
+	}
+	break;
+	case '.':
+	{
+		long n = readNumberArg();
+		stepRaw(+1, n);
+		Serial.printf("[raw] CW  -> believed=%d (edge %ldms)\r\n",
+					  g_believed, n > 0 ? n : (long)(EDGE_US / 1000));
+	}
+	break;
+	case ',':
+	{
+		long n = readNumberArg();
+		stepRaw(-1, n);
+		Serial.printf("[raw] CCW -> believed=%d (edge %ldms)\r\n",
+					  g_believed, n > 0 ? n : (long)(EDGE_US / 1000));
+	}
+	break;
 	case 'z':
 		g_believed = 0;
 		Serial.println(F("[jog] believed:=0"));
