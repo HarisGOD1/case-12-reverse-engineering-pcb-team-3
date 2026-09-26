@@ -123,6 +123,17 @@ static uint32_t ORACLE_WINDOW_MS = 700;
 // resolves the 50 ms quantum ~1000x over.
 static uint32_t SENSE_SAMPLE_US = 50;
 
+// Ready-sync: after a rejected attempt the safe is busy ~1.2 s playing the reject
+// blink and ignores input; feeding it digits then loses the leading steps. So we
+// wait on SENSE for the target to go quiet (blink over -> ready) before the next
+// action, instead of a blind delay. Ready = no SENSE edge for READY_QUIET_MS.
+static uint32_t READY_QUIET_MS = 350;	  // this much no-edge time == target idle
+static uint32_t READY_TIMEOUT_MS = 3000; // give up waiting after this (safety cap)
+// Shorter idle wait between digits of one attempt (the target is only briefly busy
+// confirming a digit, no reject animation there).
+static uint32_t DIGIT_QUIET_MS = 120;
+static uint32_t DIGIT_READY_TIMEOUT_MS = 800;
+
 // --------------------------------- Speed -----------------------------------
 // THE speed knob. Overall sweep-rate multiplier applied to every timing above
 // at boot (100 = use the *_US values as-is; higher = faster). Runtime '+'/'-'
@@ -320,6 +331,34 @@ static int kFromFreeze(long freezeMs)
 	return (int)k;
 }
 
+// Wait until the target's SENSE line goes quiet (no edge for quietMs) -- i.e. the
+// reject blink / digit-confirm activity is over and the safe is ready for input.
+// Returns true if it settled, false on timeout. With SENSE off returns false at
+// once (no signal to sync on) so blind-timing callers keep their own gaps.
+static bool waitTargetReady(uint32_t quietMs, uint32_t timeoutMs)
+{
+	if (!SENSE_ENABLE)
+		return false;
+	uint32_t t0 = millis();
+	int last = digitalRead(PIN_SENSE);
+	uint32_t lastEdge = t0;
+	for (;;)
+	{
+		uint32_t now = millis();
+		if (now - t0 >= timeoutMs)
+			return false;
+		int v = digitalRead(PIN_SENSE);
+		if (v != last)
+		{
+			last = v;
+			lastEdge = now;
+		}
+		if (now - lastEdge >= quietMs)
+			return true;
+		delayMicroseconds(300);
+	}
+}
+
 // Press the (4th) button and immediately measure the check freeze. Unlike
 // press(), the SENSE clock starts at the release edge -- no RELEASE_US wait
 // beforehand -- so the whole 50ms*k freeze is captured.
@@ -339,18 +378,27 @@ static long pressMeasureFreeze()
 static long thinkTimeOf(int d0, int d1, int d2, int d3)
 {
 	const int d[4] = {d0, d1, d2, d3};
+	// Make sure the safe is idle (previous reject blink over) before we start,
+	// or the leading digits are fed into a busy target and get lost.
+	waitTargetReady(READY_QUIET_MS, READY_TIMEOUT_MS);
 	for (int i = 0; i < 3; i++) // first three digits: ordinary confirm
 	{
 		enterDigit(d[i]);
 		press();
 		if (RESET_AFTER_PRESS >= 0)
 			g_believed = RESET_AFTER_PRESS;
-		waitUs(DIGIT_GAP_US);
+		// Wait for the digit-confirm activity to settle, else the next digit's
+		// first steps land while the target is still busy. Falls back to the
+		// fixed gap when SENSE is off.
+		if (!waitTargetReady(DIGIT_QUIET_MS, DIGIT_READY_TIMEOUT_MS))
+			waitUs(DIGIT_GAP_US);
 	}
 	enterDigit(d[3]); // fourth digit triggers the check
 	long freeze = pressMeasureFreeze();
-	// Let the reject animation drain so the next attempt starts clean.
-	waitUs((ORACLE_WINDOW_MS + 1400u) * 1000u - PRESS_US);
+	// Wait on SENSE for the reject blink to drain (target ready again) instead of
+	// a blind delay; fall back to a fixed wait if SENSE gave no signal.
+	if (!waitTargetReady(READY_QUIET_MS, READY_TIMEOUT_MS))
+		waitUs((ORACLE_WINDOW_MS + 1400u) * 1000u - PRESS_US);
 	if (RESET_AFTER_ATTEMPT >= 0)
 		g_believed = RESET_AFTER_ATTEMPT;
 	else
