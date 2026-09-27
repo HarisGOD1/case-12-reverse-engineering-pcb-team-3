@@ -1,3 +1,7 @@
 # Локальные, per-machine оверрайды Claude Code — не коммитим
 CLAUDE.local.md
 .claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
