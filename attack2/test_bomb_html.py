@@ -8,6 +8,7 @@ import base64
 import gzip
 import re
 import sys
+from unittest.mock import patch
 
 import bomb_html
 
@@ -47,6 +48,13 @@ def test_seed_inflates_to_declared_size():
     assert len(seed) < len(inflated) // 100, "seed not compressed enough to be a bomb"
 
 
+def test_seed_is_reproducible_across_build_times():
+    with patch("time.time", side_effect=(1000, 2000)):
+        first = bomb_html._gzip_seed(1024)
+        second = bomb_html._gzip_seed(1024)
+    assert first == second, "gzip timestamp changes the forged archive between builds"
+
+
 def test_no_anchor_still_injects():
     out = bomb_html.inject_bomb(b"<h1>bare</h1>")            # no </body> or </html>
     assert b"<h1>bare</h1>" in out and b"DecompressionStream" in out
@@ -59,7 +67,7 @@ def _run():
         try:
             t()
             print(f"[ok]   {t.__name__}")
-        except Exception as e:                              # noqa: BLE001 (runner reports any failure)
+        except Exception as e:  # noqa: BLE001 - report all test failures
             failed += 1
             print(f"[FAIL] {t.__name__}: {e}")
     print(f"\n{'PASS' if failed == 0 else 'FAIL'}: {len(tests)} unit tests, {failed} failure(s)")
