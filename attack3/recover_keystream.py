@@ -1,48 +1,9 @@
 #!/usr/bin/env python3
-"""
-attack7 crown PoC -- recover the storage keystream generator from a COLD FLASH
-DUMP ALONE, with NO firmware constant and NO interaction with the device.
+"""Recover the storage keystream from a cold flash dump without firmware analysis
 
-Threat model (strongest form of "no PIN, no firmware"):
-  - the attacker has one raw dump of the external QSPI flash (SOIC clip, a
-    programmer, or a BOOTSEL `picotool save`). Nothing else.
-  - the attacker never enters the PIN, never unlocks the volume, never reads
-    or disassembles the firmware, and never talks to the running device.
-
-Why it works: the hidden storage is a stream cipher whose keystream is a pure,
-firmware-fixed function of position (attack1/attack3). The generator advances by
-a constant B per 16-byte block, continuously across the whole storage, and each
-byte of a block adds a per-lane constant that is itself the arithmetic sequence
-(t-1)*W. So for storage byte offset `o` in sector `L`:
-
-    global_block = L*32 + (o // 16)
-    V = ( seed + global_block*B + ((o % 16) - 1)*W )   mod 2**32
-    keystream_byte = V >> 24
-    plaintext_byte = ciphertext_byte XOR keystream_byte
-
-Equivalently V = L*A + seed + (o//16)*B + ((o%16)-1)*W with A = 32*B: the
-per-sector step A is NOT an independent secret, it is just 32 block steps.
-
-The unknowns are recovered from ciphertext + FAT12 structure only, never from
-the firmware:
-
-  1. B (block step) and W (lane step) are recognised in a dictionary of
-     well-known public RNG/hash constants. They turn out to be the glibc rand()
-     multiplier (0x41C64E6D) and Knuth's golden-ratio hash constant
-     (0x9E3779B1) -- constants an analyst googles, not secrets. A = 32*B.
-  2. seed is recovered by interval intersection on the ring Z/2**32 over two
-     kinds of position-known bytes: the FAT12 boot-sector known-plaintext
-     (jump, OEM, bytes-per-sector, 0x55AA) and the reserved sectors, which a
-     standard MS-DOS FAT volume leaves zero-filled (plaintext 0x00 ->
-     ciphertext == keystream). This narrows seed to a few thousand candidates;
-     the true one is the single candidate that decrypts sector 0 to a
-     structurally valid boot sector AND decrypts the first FAT sector to a
-     valid FAT12 signature (held-out bytes the intersection never used).
-
-Usage:
-    python3 recover_keystream.py <flash_dump.bin> [decrypted_out.img]
-
-Exit code 0 only if recovery + verification pass.
+FAT12 fields and zero-filled sectors constrain the upper byte of each stream value
+Several seed values can decrypt the full storage to the same bytes
+See attack3/README.md for the formula, threat model, and proof limits
 """
 import io
 import sys
@@ -60,7 +21,7 @@ STORAGE_LEN = 0xB0000   # 704 KiB encrypted region
 # the rest are decoys a wrong guess would have to survive. Nothing here is read
 # from the target firmware -- these are textbook constants.
 FAMOUS = [
-    0x41C64E6D,  # glibc / ANSI C rand() LCG multiplier      (1103515245)
+    0x41C64E6D,  # POSIX sample rand() LCG multiplier
     0x9E3779B1,  # Knuth multiplicative hash (golden ratio)   (2654435761)
     0x9E3779B9,  # TEA / xxHash golden-ratio constant
     0x5851F42D,  # PCG / Knuth MMIX-family multiplier
@@ -266,7 +227,7 @@ def main(argv):
         return 1
     A, seed, B, W = res
     print("[*] recovered generator parameters from ciphertext + FAT structure only:")
-    print(f"      B    = 0x{B:08X}  ({'glibc rand() multiplier' if B == 0x41C64E6D else 'dictionary hit'})")
+    print(f"      B    = 0x{B:08X}  ({'POSIX sample rand() multiplier' if B == 0x41C64E6D else 'dictionary hit'})")
     print(f"      W    = 0x{W:08X}  ({'Knuth golden-ratio hash' if W == 0x9E3779B1 else 'dictionary hit'})")
     print(f"      A    = 0x{A:08X}  (= 32*B mod 2**32, derived)")
     print(f"      seed = 0x{seed:08X}  (one of an equivalence class that decrypts")

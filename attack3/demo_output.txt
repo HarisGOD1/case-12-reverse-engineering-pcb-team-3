@@ -3,7 +3,7 @@
 ### 1) recover_keystream.py backup_full.bin  (cold dump, no firmware, no PIN, no device)
 [*] recovering keystream generator from a cold dump (no firmware, no PIN, no device)...
 [*] recovered generator parameters from ciphertext + FAT structure only:
-      B    = 0x41C64E6D  (glibc rand() multiplier)
+      B    = 0x41C64E6D  (POSIX sample rand() multiplier)
       W    = 0x9E3779B1  (Knuth golden-ratio hash)
       A    = 0x38C9CDA0  (= 32*B mod 2**32, derived)
       seed = 0x9E37A9B7  (one of an equivalence class that decrypts

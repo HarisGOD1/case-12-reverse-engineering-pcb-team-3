@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-attack7 -- four short, concrete consequences of a positional stream cipher with
+attack3 -- four short, concrete consequences of a positional stream cipher with
 firmware-fixed, position-only keystream. Each runs against the same cold dump
 used by recover_keystream.py, or against a self-contained synthetic volume.
 
@@ -75,14 +75,13 @@ def n4_two_time_pad(gen):
     A, seed, B, W = gen
     args = R.position_args(2, A, B, W)[:SEC]
     ks = R.keystream_from_args(args, seed)[:SEC]
-    p1 = bytes(range(256)) * 2                                # arbitrary secret A
-    p2 = b"CONFIDENTIAL: launch code 0000-1111" .ljust(SEC, b"\x00")  # secret B
+    p1 = bytes(range(256)) * 2
+    p2 = b"CONFIDENTIAL: launch code 0000-1111".ljust(SEC, b"\x00")
     c1 = bytes(a ^ b for a, b in zip(p1, ks))
     c2 = bytes(a ^ b for a, b in zip(p2, ks))
     xor_of_ct = bytes(a ^ b for a, b in zip(c1, c2))
     xor_of_pt = bytes(a ^ b for a, b in zip(p1, p2))
     cancels = xor_of_ct == xor_of_pt
-    # crib: knowing p1 recovers p2 with no key at all
     p2_rec = bytes(a ^ b for a, b in zip(xor_of_ct, p1))
     print(f"  N4: C1^C2 == P1^P2 (keystream cancels): {cancels}; "
           f"crib recovers other side: {p2_rec[:35] == p2[:35]}")
@@ -100,18 +99,16 @@ def n5_no_secure_erase(gen):
 
     nsec = 32
     vol = bytearray(nsec * SEC)
-    vol[10 * SEC:10 * SEC + len(secret)] = secret               # the file's clusters
-    dir_entry = bytearray(b"PASSWRD TXT")                        # 8.3 name in a dir
+    vol[10 * SEC:10 * SEC + len(secret)] = secret
+    dir_entry = bytearray(b"PASSWRD TXT")
     vol[6 * SEC:6 * SEC + len(dir_entry)] = dir_entry
     args = R.position_args(nsec, A, B, W)
     ct = (np.frombuffer(bytes(vol), dtype=np.uint8) ^ R.keystream_from_args(args, seed)).tobytes()
 
-    # user "deletes" the file: only the first directory byte becomes 0xE5.
     vol[6 * SEC] = 0xE5
     ct = bytearray(ct)
     ct[6 * SEC] = vol[6 * SEC] ^ int(R.keystream_from_args(args, seed)[6 * SEC])
 
-    # attacker with the raw dump decrypts the still-present clusters.
     recovered = R.decrypt_all(bytes(ct), A, seed, B, W)
     got = recovered[10 * SEC:10 * SEC + len(secret)]
     ok = got == secret and b"hunter2" in zipfile.ZipFile(io.BytesIO(got)).read("passwords.txt")

@@ -1,18 +1,13 @@
-// Timing-oracle demonstration on the REAL firmware in rp2040js (CWE-208).
-// On the 4th button press the firmware calls sleep_ms(50) once per matching
-// leading PIN digit, freezing all outputs. We dial a code, then instrument the
-// sleep_ms entry (0x1000239c) and count calls whose argument is exactly 50 (the
-// oracle delay; the poll tick uses 2 and the reject animation uses 200) -> the
-// count is the matched-prefix length k, and 50*k ms is the observable think-time.
-//
-//   node oracle_demo.mjs <flash_dump.bin> <code>
+// Count only 50 ms sleep calls. Polling uses 2 ms; rejection uses 200 ms
+// The observed call count must match the PIN prefix read from flash
 import { readFileSync } from 'fs';
 import { Simulator } from 'rp2040js';
 import { bootromB1 } from './bootrom.mjs';
 
 const dump = readFileSync(process.argv[2]);
 const code = String(process.argv[3] || '0952').padStart(4, '0').slice(0, 4);
-const REF = '3952';
+const refOffset = dump.readUInt32LE(0xe10) - 0x10000000;
+const REF = [...dump.subarray(refOffset + 1, refOffset + 5)].join('');
 const SILENT = { debug() {}, info() {}, warn() {}, error() {} };
 const CYCLE_NS = 1e9 / 125e6, EDGE_MS = 30, A = 29, B = 27, SW = 28;
 const SLEEP_MS = 0x1000239c, ORACLE_ARG = 50;
@@ -56,8 +51,11 @@ runMs(700);
 const d = code.split('').map(Number);
 for (let i = 0; i < 3; i++) { dial(d[i]); mcu.gpio[SW].setInputValue(false); runMs(40); mcu.gpio[SW].setInputValue(true); runMs(80); }
 dial(d[3]);
-oracleCalls = 0; frozenNs = 0;             // count only the 4th-press compare
+oracleCalls = 0; frozenNs = 0;             // earlier button presses do not compare the PIN
 mcu.gpio[SW].setInputValue(false); runMs(40);
 mcu.gpio[SW].setInputValue(true); runMs(400);
-console.log(`code ${code} vs ${REF}: true k=${k} | observed sleep_ms(50) calls=${oracleCalls} | think-time frozen=${(frozenNs / 1e6).toFixed(1)}ms (=50*${oracleCalls})`);
-process.exit(0);
+const flag = mcu.readUint8(0x20002ed2);
+const passed = oracleCalls === k && (flag === 1) === (k === 4);
+console.log(`code ${code} vs ${REF}: expected prefix=${k} | observed sleep_ms(50) calls=${oracleCalls} | frozen=${(frozenNs / 1e6).toFixed(1)}ms | unlock flag=${flag}`);
+console.log(`[${passed ? 'PASS' : 'FAIL'}] firmware response matches the PIN reference`);
+process.exit(passed ? 0 : 1);

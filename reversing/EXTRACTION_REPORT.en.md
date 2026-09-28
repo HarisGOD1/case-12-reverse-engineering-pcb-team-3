@@ -1,98 +1,38 @@
-# RP2040 Flash Dump → Program Extraction & Decompilation
+# RP2040 program extraction and decompilation
 
-## Source (Ghidra Server)
+This report records how the team isolated program bytes from the [full flash dump](../artifacts/backup_full.bin). [Attack 0](../attack0/README.md) records how the team read the flash from the board
 
-- **Server:** `ghidra://157.228.183.38:13100`
-- **Repository:** `pcb-team-3`
-- **File:** `backup_full.bin` (content type `Program`, version 2)
-- **Program language:** `ARM:LE:32:Cortex`, mapped at base `0x10000000`
-- Repo has exactly **one** program file (the full flash dump).
+## Flash layout
 
-## Step 1 — Memory → Program (carving)
+The raw image spans two MiB. Ghidra maps it at `0x10000000` as `ARM:LE:32:Cortex`. [`memmap.txt`](memmap.txt) records the memory export
 
-`DumpMemoryMap.java` exported the whole initialized memory of the imported program.
+| Flash offset | Content |
+| --- | --- |
+| `0x000000–0x0000FF` | boot2 flash loader |
+| `0x000100–0x006FFF` | vector table, application code, and constants |
+| `0x007000–0x0FFFFF` | erased flash |
+| `0x100000–0x1AF5FF` | encrypted storage data |
+| `0x1AF600–0x1FFFFF` | erased flash |
 
-| Artifact | Offset range | Size | Meaning |
-|---|---|---|---|
-| `memory_full.bin` | — | **0x200000 (2 MiB)** | Complete flash image ("memory") |
-| `program.bin` | `0x0000 – 0x6FFF` | **0x7000 (28 KiB)** | The flashed **program** (boot2 + app + rodata) |
-| `app.bin` | `0x0100 – 0x6FFF` | 0x6F00 (28,416 B) | Application only (vector table onward, base `0x10000100`) |
-| `flash_data_blob.bin` | `0x100000 – 0x1AF5FF` | 0xAF600 (718 KiB) | High-entropy data region (separate from code) |
+The vector table holds SP `0x20042000` and reset vector `0x100001F7`. The low bit of the reset vector selects Thumb mode
 
-### Flash map (from `memmap.txt` + analysis)
+The boot2 CRC at `0xFC` is `0x7A4EB274`. CRC-32/MPEG-2 over bytes `0x00–0xFB` gives the same value. `zlib.crc32` uses different parameters and gives `0xD4A3FD6A`
 
-```
-0x000000 - 0x0000FF  boot2 (RP2040 stage2 flash loader)      <- program
-0x000100 - 0x0001FF  vector table + reserved                 <- program
-0x000200 - 0x006FFF  .text / .rodata / data                  <- program
-0x007000 - 0x0FFFFF  erased (0xFF)
-0x100000 - 0x1AF5FF  high-entropy blob (NOT ARM code)        <- data
-0x1AF600 - 0x1FFFFF  erased (0xFF)
-```
+## Program artifacts
 
-**Carving rule used:** the program is the contiguous non-erased region at the
-bottom of flash (`0x0000–0x6FFF`); everything after the first 0xFF gap is not
-executable program code. The program's last code address is `0x10006708`; the
-last used byte is at `0x6FFF` (page-aligned), then flash is erased.
+| File | Content |
+| --- | --- |
+| [`program.bin`](program.bin) | first `0x7000` flash bytes, with boot2, application code, and constants |
+| [`app.bin`](app.bin) | application bytes from offset `0x100`, with load base `0x10000100` |
+| [`program_decompiled.c`](program_decompiled.c) | decompiled program functions |
+| [`program_summary.txt`](program_summary.txt) | function and string inventory |
 
-### Vector table (RP2040, ARMv6-M)
+[`scripts/DumpMemoryMap.java`](scripts/DumpMemoryMap.java) exports initialized Ghidra memory. [`scripts/DecompileAll.java`](scripts/DecompileAll.java) imports the program range and decompiles its functions
 
-```
-Initial SP      = 0x20042000
-Reset_Handler   = 0x100001F7  (Thumb, LSB=1)
-NMI             = 0x100001CB
-HardFault       = 0x100001CD
-```
+## Findings and limits
 
-### boot2 integrity note
+The firmware uses Pico SDK and TinyUSB. USB MSC exposes the encrypted storage volume after PIN entry. It does not expose the firmware area as a writable MSC volume
 
-- Stored CRC32 @ `0xFC` = `0x7A4EB274`
-- Computed CRC32 over `0x00..0xFB` = `0xD4A3FD6A` → **MISMATCH**
-- The boot2 image has been **modified** (stock W25Q080 boot2 would validate).
+The USB string `123456` is a serial number, not a PIN. [Attack 8](../attack8/README.md) identifies the PIN comparison bytes. [Attack 1](../attack1/README.md) verifies the storage cipher and FAT12 output
 
-## Step 2 — Decompile with Ghidra
-
-`DecompileAll.java` imported `program.bin` into a fresh local project with
-`-processor ARM:LE:32:Cortex -loader-baseAddr 0x10000000` and decompiled every
-function.
-
-- **155 / 155 functions decompiled successfully** → `program_decompiled.c` (5,690 lines)
-- `program_summary.txt`: full function inventory + 16 defined strings
-
-### Program identification (skills applied)
-
-Using `armv8-reversing` + `firmware-analysis`:
-
-- This is a **pico-SDK + TinyUSB + FatFs USB Mass Storage ("flash disk")** firmware.
-- Strings: `POSILABS`, ` FLASH MSC `, `PositiveLabs`, `RP2040 Flash MSC`,
-  `123456`, `Flash Disk`, `usb_token`, plus TinyUSB panic/endpoint messages.
-- **`main` = `FUN_1000089c`** — calls GPIO init (`FUN_100050e0`), then loops
-  `FUN_10003858` (TinyUSB device task) + `FUN_100009a4` (timed GPIO/LED work).
-- `FUN_10000000` = pico-SDK reset/CRT runtime; `FUN_10000ab0` = GPIO function-select init.
-- `FUN_10005104` = `memmove`, `FUN_100051c8` = `strlen`, `FUN_10004f60` = FatFs path/alloc helper.
-
-### Security observations (firmware-update-security skill)
-
-- No asymmetric signature / SHA verification code path was found in the
-  application: **no authenticity or integrity gate** on the exposed flash.
-- The device exposes its own flash over USB MSC ("Flash Disk"), so the flash
-  contents are writable from the host with **no update-authentication check**.
-- `123456` appears in the TinyUSB string-descriptor table (offset `0x6734`) —
-  a weak/hardcoded identifier (default PIN/label).
-- The 718 KiB high-entropy blob at `0x100000` is not ARM code; likely the
-  filesystem/encrypted payload area and the next thing worth reversing.
-
-## Reproduction
-
-```bash
-# 1. export memory from the server program (read-only)
-GHIDRA_JAVA_OPTIONS="-Duser.name=core_gemeni" analyzeHeadless \
-  ghidra://157.228.183.38:13100/pcb-team-3 -connect core_gemeni -p -readOnly \
-  -noanalysis -scriptPath ghidra_scripts -postScript DumpMemoryMap.java \
-  -process backup_full.bin
-
-# 2. carve program (0x0000-0x6FFF) and import + decompile
-analyzeHeadless /tmp/ghproj prog -import program.bin \
-  -processor ARM:LE:32:Cortex -loader-baseAddr 0x10000000 \
-  -scriptPath ghidra_scripts -postScript DecompileAll.java
-```
+The absence of a firmware signature check matters to [attack 6](../attack6/README.md). BOOTSEL provides a separate flash write path, and the attack 6 emulator stand tests modified program behavior

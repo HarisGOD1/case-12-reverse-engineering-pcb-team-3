@@ -13,8 +13,8 @@ script recovers keystream at those positions from a cold dump, with no PIN, no
 device and no firmware constants. Because the keystream repeats by position and
 is identical across every same-build device, the recovered bytes decrypt the
 same positions on any of them. Turning this partial leak into the full generator
-(and thus every position) is [attack7](../attack7/README.md); here we only show
-the primitive that makes the cipher unusable.
+(and thus every position) is `recover_keystream.py` in this directory; here we
+only show the primitive that makes the cipher unusable.
 
 Usage: python3 known_plaintext.py <flash_dump.bin>
 """
@@ -51,11 +51,11 @@ def main(argv):
     # known plaintext exactly -- i.e. these positions are now decryptable.
     ok = all((st[p] ^ k) == (KNOWN_LBA0.get(p, 0x00)) for p, k in ks.items())
     print(f"recovered keystream at {len(ks)} positions with no firmware/PIN/device")
-    print(f"  boot-sector sample: LBA0[0..2] keystream = {bytes(ks[i] for i in (0,1,2) if i in ks).hex(' ')}")
+    print(f"  boot-sector sample: LBA0[0,2] keystream = {bytes(ks[i] for i in (0, 2)).hex(' ')}")
     print(f"  from zero sector 1: 512 keystream bytes, first 8 = {bytes(ks[SEC+i] for i in range(8)).hex(' ')}")
     print(f"  round-trip decrypt of known positions matches plaintext: {ok}")
     print("  => these bytes decrypt the same positions on ANY same-build device;")
-    print("     linear structure extends them to every position (see attack7)")
+    print("     linear structure extends them to every position (recover_keystream.py)")
     return 0 if ok else 1
 
 

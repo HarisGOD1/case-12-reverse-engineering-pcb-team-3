@@ -5,7 +5,7 @@ attack2 -- evil-maid content forgery. The storage cipher has no MAC or signature
 the encrypted volume: encrypt attacker-chosen bytes with the same positional
 keystream, and the device decrypts them back as genuine content on the next read.
 
-The keystream is recovered from a cold dump with no firmware/PIN (attack7), then
+The keystream is recovered from a cold dump with no firmware/PIN (attack3), then
 reused in the encrypt direction (XOR is its own inverse). The forged ciphertext
 is what you would drop onto the flash via a write channel (write10 after any
 unlocked session, a BOOTSEL reflash, or a chip programmer).
@@ -17,7 +17,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "attack7"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "attack3"))
 import recover_keystream as R  # noqa: E402  (shared generator, single source of the cipher math)
 
 SEC = R.SEC
