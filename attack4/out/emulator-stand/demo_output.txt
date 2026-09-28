@@ -1,0 +1,25 @@
+Прогон эмуляторного стенда (без железа): node stand.mjs backup_full.bin <pin>
+
+########## PIN 3952 (correct) ##########
+booted (700 ms virtual); USB gated behind PIN loop: true
+entering PIN 3952 via emulated encoder...
+  dialled 3 (ok=true)
+  dialled 9 (ok=true)
+  dialled 5 (ok=true)
+  dialled 2 (ok=true)
+unlock flag *0x20002ed2 = 1 -> UNLOCKED
+[PASS] PIN 3952: real firmware opened in emulation, no hardware
+
+########## PIN 3951 (wrong) ##########
+booted (700 ms virtual); USB gated behind PIN loop: true
+entering PIN 3951 via emulated encoder...
+  dialled 3 (ok=true)
+  dialled 9 (ok=true)
+  dialled 5 (ok=true)
+  dialled 1 (ok=true)
+unlock flag *0x20002ed2 = 0 -> locked
+[INFO] PIN 3951: not opened (expected for a wrong PIN)
+
+# Калибровка энкодера (пробник, для справки): при 30 мс/фронт декодер прошивки
+# считает чисто и монотонно (0->1->2->... , заворот 0<->9); при 3-15 мс/фронт
+# часть фронтов отбрасывается как дребезг

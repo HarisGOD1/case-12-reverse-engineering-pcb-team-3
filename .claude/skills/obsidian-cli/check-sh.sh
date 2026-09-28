@@ -1,0 +1,1274 @@
+#!/usr/bin/env bash
+# Other repositories take this file through the vendoring cascade (references/bump-cascade.md
+# in https://github.com/rokokol/ci-skill): a copy is never edited in place, a change is made
+# here and reaches them from here
+# Needs bash 3.2 and POSIX tools only, so it runs on a macOS runner unchanged
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+check-sh.sh — holds a shell script's help, documents and completions to its code
+
+The help is the single source of truth for what a script accepts, so every subcommand its
+dispatcher has, every flag its parsers take, every variable it reads and every code it
+exits with must be in the help — and every document and completion that restates a list
+is held to the same code, in both directions. Each check is proven able to fail on every
+run, on a canonical script with one defect planted, so a copy falsifies itself wherever
+it runs. It has no repo-specific part: a repository takes it through the vendoring
+cascade and calls it from its own gate
+
+  check-sh.sh [-n NAME] [-e PREFIX] [-d DOC]... [-m DOC]... [-c BASH ZSH] SCRIPT
+  check-sh.sh --template [script|bash|zsh]
+
+  -n NAME      what the help, the docs and the completions call the script (default:
+               the script's basename)
+  -e PREFIX    the script reads environment variables with this prefix; each must be
+               in the help
+  -d DOC       a document that lists the script's subcommands, checked both ways: every
+               subcommand named, and every `NAME word` it spells real; repeatable
+  -m DOC       a document that mentions only some of them and sends the reader to the
+               help for the rest: every `NAME word` it spells must be real; repeatable
+  -c BASH ZSH  the two completion files, checked both ways
+  --template   print the canonical script, or its bash or zsh completion, and exit
+
+The shapes it reads are the standard's own: a `case "$cmd"` dispatcher at the top level
+with `-h | --help | help)` and a `*)` arm that sends usage to stderr, flag arms such as
+`-n | --dry-run)` inside cmd_<sub>() functions or at the top level, literal `exit N`, a
+help printed from a heredoc or by a `help [SUB]` subcommand, and a header comment that
+lists nothing. They are spelled out in references/shape.md and help.md of
+https://github.com/rokokol/bash-best-practices-skill. A header line claiming "Needs bash
+X.Y" turns on a grep for constructs newer than that floor, and "POSIX tools only" one for
+flags a BSD userland lacks or reads another way; a grep is a proxy, and the proof is a run
+under the bash the claim names
+
+CHECK_SH_NESTED=1 runs the checks and skips the self-test. The self-test runs itself that
+way, and so should a gate that calls this script more than once in one run: the copy and
+its tools are the same for every call, so proving it again proves nothing new. The first
+call of every run keeps it: it is what notices a copy that stopped catching defects, and
+the bash and tools under a copy change without the copy changing
+
+Nothing here reaches the network
+Exit 0 when everything agrees, 1 with one `check-sh: <what>` line per finding, 2 on a
+usage error, an unreadable file, a --help that fails, or a script with nothing to check
+EOF
+}
+
+self=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")
+
+die() { # a usage error, never a finding
+  printf 'check-sh: %s\n' "$1" >&2
+  exit 2
+}
+
+# ---- the canonical script, and the completions that mirror it -------------------------
+# The self-test below plants defects into this script, and `--template` prints it, so the
+# shape the checker proves itself on and the shape it hands out are one text.
+
+template_script() {
+  cat <<'TEMPLATE'
+#!/usr/bin/env bash
+# Needs bash 3.2 and POSIX tools only
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+script.sh — one line saying what it is and what it is for
+
+  script.sh run [-n|--dry-run] [-l DIR]    do the thing, in DIR
+  script.sh stop                           stop doing it
+
+  -n, --dry-run   say what would be done and do nothing
+  -l DIR          the log directory (default: $SCRIPT_LOGDIR, else the current one)
+
+Environment: SCRIPT_LOGDIR is the log directory when -l is not given
+Nothing here reaches the network
+Exit 0 done, 1 when the thing asked about is wrong, 2 on a usage error
+EOF
+}
+
+fail() { # the thing asked about is wrong
+  printf 'script.sh: %s\n' "$1" >&2
+  exit 1
+}
+
+die() { # the request itself is wrong
+  printf 'script.sh: %s\n' "$1" >&2
+  exit 2
+}
+
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+# >>> EXAMPLE: the subcommands, one cmd_<name>() each, with their parser inside
+cmd_run() {
+  local dry=0 logdir="${SCRIPT_LOGDIR:-.}"
+  while (($#)); do
+    case "$1" in
+      -n | --dry-run)
+        dry=1
+        shift
+        ;;
+      -l)
+        # Not ${2:?}: that exits 1 with bash's own message, and a usage error is 2
+        (($# >= 2)) || die "-l needs a directory"
+        logdir="$2"
+        shift 2
+        ;;
+      -*) die "no such flag: $1" ;;
+      *) break ;;
+    esac
+  done
+  [[ -d "$logdir" ]] || fail "$logdir is not a directory"
+  if ((dry)); then
+    printf 'would run in %s\n' "$logdir"
+  else
+    printf 'ran in %s from %s\n' "$logdir" "$HERE"
+  fi
+}
+
+cmd_stop() {
+  printf 'stopped\n'
+}
+# <<< EXAMPLE
+
+cmd="${1:-}"
+(($# == 0)) || shift
+case "$cmd" in
+  run) cmd_run "$@" ;;
+  stop) cmd_stop "$@" ;;
+  -h | --help | help) usage ;;
+  '')
+    usage >&2
+    exit 2
+    ;;
+  *)
+    printf 'script.sh: no such subcommand: %s\n\n' "$cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+TEMPLATE
+}
+
+template_bash() {
+  cat <<'EOF'
+# shellcheck shell=bash
+# Tab completion for script.sh in bash. Hand-written on purpose and drift-checked by
+# machine: check-sh.sh -c holds every word here to the script's dispatcher and parsers.
+# Builtins only, so it works without the bash-completion package and under the bash 3.2
+# a stock macOS sources it with.
+_script_sh() {
+  local cur prev words
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD - 1]}"
+  if ((COMP_CWORD == 1)); then
+    words="run stop help"
+  else
+    case "${COMP_WORDS[1]}" in
+      run)
+        case "$prev" in
+          -l)
+            compopt -o dirnames 2>/dev/null || true
+            return
+            ;;
+        esac
+        words="-n --dry-run -l"
+        ;;
+      *) words="" ;;
+    esac
+  fi
+  COMPREPLY=()
+  while IFS= read -r word; do
+    [[ -n "$word" ]] && COMPREPLY+=("$word")
+  done < <(compgen -W "$words" -- "$cur")
+}
+complete -F _script_sh script.sh
+EOF
+}
+
+template_zsh() {
+  cat <<'EOF'
+#compdef script.sh
+# Tab completion for script.sh in zsh. Hand-written on purpose and drift-checked by
+# machine: check-sh.sh -c holds every word here to the script's dispatcher and parsers.
+# The #compdef line binds it when the file sits on $fpath as _script.sh, and the last
+# line calls the function, which is the autoload convention.
+_script_sh() {
+  local -a subcommands
+  subcommands=(
+    'run:do the thing'
+    'stop:stop doing it'
+    'help:show the help'
+  )
+  _arguments -C \
+    '1:subcommand:->subcommand' \
+    '*::arguments:->arguments'
+  case "$state" in
+    subcommand) _describe 'subcommand' subcommands ;;
+    arguments)
+      case "${words[1]}" in
+        run)
+          _arguments \
+            '(-n --dry-run)'{-n,--dry-run}'[say what would be done]' \
+            '-l[the log directory]:directory:_directories'
+          ;;
+      esac
+      ;;
+  esac
+}
+_script_sh "$@"
+EOF
+}
+
+# ---- arguments --------------------------------------------------------------------
+name=""
+prefix=""
+docs=()
+mentions=()
+comp_bash=""
+comp_zsh=""
+script=""
+while (($#)); do
+  case "$1" in
+    -n)
+      (($# >= 2)) || die "-n needs a name"
+      name="$2"
+      shift 2
+      ;;
+    -e)
+      (($# >= 2)) || die "-e needs a prefix"
+      prefix="$2"
+      shift 2
+      ;;
+    -d)
+      (($# >= 2)) || die "-d needs a document"
+      docs+=("$2")
+      shift 2
+      ;;
+    -m)
+      (($# >= 2)) || die "-m needs a document"
+      mentions+=("$2")
+      shift 2
+      ;;
+    -c)
+      (($# >= 3)) || die "-c needs two files, the bash and the zsh completion"
+      comp_bash="$2"
+      comp_zsh="$3"
+      shift 3
+      ;;
+    --template)
+      case "${2:-script}" in
+        script) template_script ;;
+        bash) template_bash ;;
+        zsh) template_zsh ;;
+        *) die "no such template: $2 — script, bash or zsh" ;;
+      esac
+      exit 0
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -*)
+      usage >&2
+      exit 2
+      ;;
+    *)
+      [[ -z "$script" ]] || die "one script at a time"
+      script="$1"
+      shift
+      ;;
+  esac
+done
+[[ -n "$script" ]] || {
+  usage >&2
+  exit 2
+}
+[[ -r "$script" ]] || die "cannot read $script"
+[[ -n "$name" ]] || name=$(basename -- "$script")
+for f in "${docs[@]+"${docs[@]}"}" "${mentions[@]+"${mentions[@]}"}" "$comp_bash" "$comp_zsh"; do
+  [[ -z "$f" || -r "$f" ]] || die "cannot read $f"
+done
+
+findings=0
+finding() {
+  printf 'check-sh: %s\n' "$1" >&2
+  findings=$((findings + 1))
+}
+
+# With a template, because the BSD mktemp on macOS wants one
+work=$(mktemp -d "${TMPDIR:-/tmp}/check-sh.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+# The code as the checker reads it, line numbers kept. Every heredoc body is blanked: a
+# help text or a template inside one carries dispatchers, flag rows and exit lines of its
+# own, which are not this script's. The opening line stays, since it can carry code. A
+# `<<WORD` opens a heredoc only outside quotes and comments: read inside a string as an
+# opener, it blanked the rest of the file. With 1 the inside of every single-quoted string
+# is blanked too: single quotes suppress every expansion, so what they hold runs nothing
+# and a construct named there is none of the script's. With 2 double-quoted text goes as
+# well, and that copy is for the command-shaped patterns alone — a `declare -A` inside a
+# message is prose, and a gate proving a bash is 3.2 has to write it. The expansion-shaped
+# patterns keep reading double quotes, because `echo "${v,,}"` is a use and not a mention:
+# double quotes suppress nothing. Quotes are tracked across lines, since an awk or sed
+# program spans several
+mask_code() { # mask_code FILE 0|1|2 -> heredoc bodies, single-quoted text at 1, double too at 2
+  awk -v sq="$2" '
+    inhd {
+      line = $0
+      if (dash) sub(/^\t+/, "", line)
+      if (line == term) inhd = 0
+      print ""
+      next
+    }
+    {
+      out = ""
+      opener = ""
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (q == "\047") {
+          if (c == "\047") { q = ""; out = out c } else out = out (sq >= 1 ? " " : c)
+          continue
+        }
+        # $'"'"'...'"'"', where a backslash escapes the quote rather than standing for itself
+        if (q == "$") {
+          if (c == "\\") { out = out (sq >= 1 ? "  " : substr($0, i, 2)); i++; continue }
+          if (c == "\047") { q = ""; out = out c } else out = out (sq >= 1 ? " " : c)
+          continue
+        }
+        if (q == "\"") {
+          if (c == "\\") { out = out (sq >= 2 ? "  " : substr($0, i, 2)); i++; continue }
+          if (c == "\"") { q = ""; out = out c; continue }
+          out = out (sq >= 2 ? " " : c)
+          continue
+        }
+        if (c == "\\") { out = out substr($0, i, 2); i++; continue }
+        if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[ \t;&|()]/)) { out = out substr($0, i); break }
+        if (substr($0, i, 2) == "$\047") { q = "$"; out = out substr($0, i, 2); i++; continue }
+        if (c == "\047" || c == "\"") { q = c; out = out c; continue }
+        if (opener == "" && substr($0, i, 2) == "<<" && substr($0, i, 3) != "<<<" && (i == 1 || substr($0, i - 1, 1) != "<") &&
+          match(substr($0, i), /^<<-?[\047"]?[A-Za-z_][A-Za-z0-9_]*/))
+          opener = substr($0, i, RLENGTH)
+        out = out c
+      }
+      print out
+      if (opener != "") {
+        dash = (substr(opener, 3, 1) == "-")
+        sub(/^<<-?[\047"]?/, "", opener)
+        term = opener
+        inhd = 1
+      }
+    }
+  ' "$1"
+}
+
+# ERE-quoted, so a name with a dot matches itself and nothing else
+name_re=$(printf '%s' "$name" | sed 's/[][\\.*^$/+?(){}|]/\\&/g')
+
+# Whole tokens only. A substring match let `-f` pass on a completion that offered only
+# `--force`, and `grep -w` treats the hyphen as a separator, accepting `--help` inside
+# `--help-all`. A `]` is literal only first in a bracket expression, and `\]` is not an
+# escape there — GNU grep 3.12 read the escaped form as the bracket's end.
+has_token() { # has_token TOKEN <<<TEXT -> 0 when TEXT holds TOKEN as a whole token
+  grep -qE -- "(^|[^[:alnum:]_-])$1([^[:alnum:]_-]|\$)"
+}
+
+# What a completion file offers, without the prose around it. A word in a comment is not
+# offered, and neither is one in a zsh description: the text in `[...]` after an option,
+# the part after the colon of a `'sub:description'` entry, the message between the first
+# colons of an `'N:message:action'` spec — whose action, `(run stop)`, is kept. Nor is a
+# case pattern opening a line inside `case … in … esac`, `-l)` or `--prefix | --destdir)`:
+# that arm handles a flag's value and offers nothing, and a flag dropped from the list
+# survived there. Only single words joined by `|` count as a pattern, so the last line of
+# an array wrapped onto two, `    --no-configure --uninstall)`, is still read as offered.
+# Quotes are walked a line at a time, so a `#` inside them is not a comment.
+offered_words() { # offered_words FILE 0|1 -> FILE with comments dropped, and zsh prose when 1
+  awk -v zsh="$2" '
+    function prose(s, n, f, i, out) {
+      if (!zsh) return s
+      gsub(/\[[^]]*\]/, "", s)
+      n = split(s, f, ":")
+      if (n < 2) return s
+      if (n == 2) return f[1]
+      out = f[1]
+      for (i = 2; i <= n && f[i] == ""; i++) out = out ":"
+      out = out ":"
+      for (i++; i <= n; i++) out = out ":" f[i]
+      return out
+    }
+    {
+      line = $0; out = ""; q = ""; body = ""
+      if ($0 ~ /^[ \t]*case .* in[ \t]*$/) incase++
+      else if (incase && $0 ~ /^[ \t]*esac([ \t;]|$)/) incase--
+      else if (incase) sub(/^[ \t]*[^ \t|()]+([ \t]*[|][ \t]*[^ \t|()]+)*\)/, "", line)
+      while (line != "") {
+        c = substr(line, 1, 1)
+        if (q == "") {
+          if (c == "#" && (out == "" || out ~ /[ \t]$/)) break
+          if (c == "\047" || c == "\"") { q = c; body = "" } else out = out c
+          line = substr(line, 2)
+        } else if (c == "\\" && q == "\"") {
+          body = body substr(line, 1, 2); line = substr(line, 3)
+        } else if (c == q) {
+          out = out q prose(body) q; q = ""; line = substr(line, 2)
+        } else {
+          body = body c; line = substr(line, 2)
+        }
+      }
+      if (q != "") out = out q body
+      print out
+    }
+  ' "$1"
+}
+
+# ---- the truth: read out of the code ---------------------------------------------
+# Subcommands, flags with the subcommand they belong to (`-` for a global one), the
+# environment variables read, the exit codes returned. Extractors that find nothing are
+# findings or refusals, because an empty list passes every loop.
+
+subs=()
+flags=() # "SUB<TAB>FLAG" per line, SUB is - for a global flag
+open_set=0
+proxy_only=0
+{
+  header=$(sed -n '2,/^[^#]/p' "$script" | sed '$d')
+  # The floor the header declares, as one number: 3.2 is 302, 4.3 is 403, no claim is 0.
+  # Any version is read rather than 3.2 alone, so a tool that needs 4.3 is still held to
+  # what arrived after it and nothing earlier
+  # Every text here reaches its reader through <<<, never through a pipe: a `grep -q` that
+  # finds its match closes the pipe, and the producer's next write dies of SIGPIPE, which
+  # `pipefail` then makes the pipeline's status (shape.md, pitfalls.md)
+  # `|| :` because a header with no claim is the ordinary case, and a grep that finds
+  # nothing exits 1, which pipefail would make the substitution's status and -e would act on
+  claim=$(grep -oE 'Needs bash [0-9]+(\.[0-9]+)?' <<<"$header" | sed -n 1p || :)
+  floor=0
+  [[ -z "$claim" ]] ||
+    floor=$(awk -v v="${claim#Needs bash }" 'BEGIN { n = split(v, p, "."); print p[1] * 100 + (n > 1 ? p[2] : 0) }')
+  # The userland is a second claim and an independent one: bash 5 from brew or nix with a
+  # BSD sed around it is an ordinary macOS machine, and its flags are the ones that differ
+  posix_tools=0
+  ! grep -q 'POSIX tools only' <<<"$header" || posix_tools=1
+  code="$work/code"
+  mask_code "$script" 0 >"$code"
+  code_sq="$work/code_sq"
+  mask_code "$script" 1 >"$code_sq"
+  # A third copy with double-quoted text blanked as well, for the patterns that look for a
+  # command rather than an expansion: see mask_code's comment for why the two differ
+  code_dq="$work/code_dq"
+  mask_code "$script" 2 >"$code_dq"
+
+  # The dispatcher: the top-level `case "$cmd" in` … `esac`, one arm per subcommand,
+  # `a | b)` split into two. The help arm and the refusal arms are not subcommands.
+  # shellcheck disable=SC2016 # `$cmd` is matched literally, in the script's own text
+  dispatch=$(sed -n '/^case "\$cmd" in$/,/^esac$/p' "$code")
+  if [[ -n "$dispatch" ]]; then
+    while IFS= read -r arm; do
+      [[ -n "$arm" && "$arm" != help ]] || continue
+      subs+=("$arm")
+    done < <(printf '%s\n' "$dispatch" |
+      sed -n 's/^  \([a-z][a-z0-9-]*\( *| *[a-z][a-z0-9-]*\)*\)).*/\1/p' | tr '|' '\n' | tr -d ' ')
+    # The *) arm refuses, and a refusal is not output: a usage printed there goes to stderr.
+    # A wrapper's *) arm passes the word through to another tool instead, and says so with
+    # the comment `# pass-through` inside the arm; then the subcommand set is open — the
+    # help and the docs may name commands the dispatcher never spells — and only the flags
+    # stay closed. A declaration rather than a guess: whether an arm refuses is decided by
+    # the helper it calls, which no grep can see
+    refusal=$(printf '%s\n' "$dispatch" | sed -n '/^  \([^)]* | \)\{0,1\}\*)/,/;;/p')
+    [[ -n "$refusal" ]] || finding "$name's dispatcher has no *) arm to refuse an unknown subcommand"
+    usage_rows=$(grep -E '(^|[^[:alnum:]_])usage([^[:alnum:]_]|$)' <<<"$refusal" || :)
+    # Not <<<"" on an empty list: a here-string of nothing is still one empty line, which
+    # `grep -v` matches, and the finding would fire on an arm with no usage at all
+    [[ -z "$usage_rows" ]] || ! grep -qv '>&2' <<<"$usage_rows" ||
+      finding "$name's *) arm prints its usage to stdout rather than stderr"
+    ! grep -q '# pass-through' <<<"$refusal" || open_set=1
+  fi
+
+  # The flags: every `-x | --long)` arm, attributed to the cmd_<sub>() function it sits
+  # in, or global when it sits in no function. Arms in any other function are not a
+  # parser of this script's own flags and are left alone. The function is found by its
+  # opening line at column 0, so a nested case is read as its function's.
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    flags+=("$line")
+  done < <(awk '
+    # A one-line function, `usage() { …; }`, opens and closes on the same line
+    /^[a-z_][a-z0-9_]*\(\) \{/ && !/\}[[:space:]]*$/ { fn = $0; sub(/\(\).*/, "", fn); next }
+    /^}/ { fn = ""; next }
+    match($0, /^ *(--?[a-zA-Z][a-zA-Z0-9-]*)( *\| *--?[a-zA-Z][a-zA-Z0-9-]*)*\)/) {
+      line = substr($0, RSTART, RLENGTH)
+      sub(/\)$/, "", line)
+      gsub(/ /, "", line)
+      n = split(line, parts, "|")
+      owner = "-"
+      if (fn != "") {
+        if (substr(fn, 1, 4) == "cmd_") { owner = substr(fn, 5); gsub(/_/, "-", owner) } else next
+      }
+      for (i = 1; i <= n; i++) print owner "\t" parts[i]
+    }' "$code")
+  # A plain script with no dispatcher and no flag has no help for anything to agree with.
+  # If its header claims bash 3.2 the proxy below is still worth running, and it is all
+  # that runs; with no claim either there is nothing to check, which is a refusal
+  if ((${#subs[@]} + ${#flags[@]} == 0)); then
+    ((floor || posix_tools)) ||
+      die "nothing to check in $script: no case \"\$cmd\" dispatcher, no flag arms and no bash floor or POSIX userland claim — see references/shape.md"
+    proxy_only=1
+  fi
+  # The help arm is spelled one way, so a reader and a completion can count on all three.
+  # A wrapper passes `help` through to the tool behind it, whose help is the better one,
+  # so it may answer -h and --help as flags before the dispatcher instead
+  if [[ -n "$dispatch" ]] && ! grep -qE '^  -h \| --help \| help\)' <<<"$dispatch"; then
+    flag_rows=$(printf '%s\n' "${flags[@]+"${flags[@]}"}")
+    if ! { ((open_set)) && grep -qx -- $'-\t--help' <<<"$flag_rows"; }; then
+      finding "$name's dispatcher has no -h | --help | help arm"
+    fi
+  fi
+}
+
+known_sub() { # known_sub WORD -> 0 when the dispatcher has it, or it is the help, or the set is open
+  local s
+  [[ "$1" != help ]] || return 0
+  ((open_set == 0)) || return 0
+  for s in "${subs[@]+"${subs[@]}"}"; do [[ "$s" == "$1" ]] && return 0; done
+  return 1
+}
+known_flag() { # known_flag FLAG [SUB] -> 0 when SUB (or any parser) accepts it, or it is the help
+  local f owner want="${2:-}"
+  case "$1" in -h | --help) return 0 ;; esac
+  for f in "${flags[@]+"${flags[@]}"}"; do
+    owner="${f%%	*}"
+    [[ "${f#*	}" == "$1" ]] || continue
+    [[ -z "$want" || "$owner" == "$want" || "$owner" == - ]] && return 0
+  done
+  return 1
+}
+
+# ---- the bash 3.2 claim: a proxy, honestly labelled ------------------------------
+# Every literal below is split by a bracket expression so the pattern cannot match its
+# own line. A grep is a proxy: it once let nine constructs through that the real 3.2
+# rejects, which is why the claim is proven by a run under /bin/bash on a macOS runner
+# and this is only the cheap first look. It runs before the help is asked for, since
+# under a real 3.2 a script holding such a construct may not parse at all
+# Each row below is the bash a construct needs and the pattern that finds it, and a script
+# is held to the rows *above* the floor it declares: `Needs bash 4.3` is checked for 4.4
+# and 5.2 constructs and left alone about `mapfile`. The floors are bash's own NEWS, and
+# references/portability.md carries the same table in prose, for a reader rather than a grep
+# The middle column says which copy of the code the pattern is read in. `cmd` is a command,
+# which a string only names — `fail "this bash accepts declare -A"` is prose, and a gate
+# proving a bash is 3.2 has to write that sentence — so those are matched where quoted text
+# is blanked. `exp` is an expansion, which double quotes do not suppress: `echo "${v,,}"`
+# lowercases at runtime, so those keep reading inside them
+version_rows() {
+  cat <<'ROWS'
+400	cmd	(^|[^-A-Za-z0-9_])mapfil[e][[:space:]]
+400	cmd	(^|[^-A-Za-z0-9_])readarra[y][[:space:]]
+400	cmd	(^|[^-A-Za-z0-9_])declar[e] -A
+400	cmd	(^|[^-A-Za-z0-9_])loca[l] -A
+400	exp	\$\{[A-Za-z_]+,[,]\}
+400	exp	\$\{[A-Za-z_]+\^[\^]\}
+400	cmd	;;[&]
+400	cmd	[^|]\|[&][^&]
+400	cmd	(^|[^-A-Za-z0-9_])rea[d] [^;|&]*-t ?[0-9]*[.][0-9]
+400	cmd	(^|[^-A-Za-z0-9_])globsta[r]
+401	cmd	(^|[^$])[{][A-Za-z_][A-Za-z0-9_]*[}][<>]
+402	exp	\[\[[^]]*[-]v [A-Za-z_]
+402	exp	\$\{[A-Za-z_][A-Za-z0-9_]*:[^}:]*:[-][0-9]
+403	cmd	(^|[^-A-Za-z0-9_])declar[e] -n
+403	cmd	(^|[^-A-Za-z0-9_])loca[l] -n
+403	cmd	(^|[^-A-Za-z0-9_])wai[t] -n
+404	exp	\$\{[A-Za-z_]+@[QEPAaKk]\}
+502	exp	\$\{[A-Za-z_][A-Za-z0-9_]*//?[^/}]*/["]
+502	exp	\$\{[A-Za-z_][A-Za-z0-9_]*//?[^/}]*/[^}]*[&]
+ROWS
+}
+active_cmd=''
+active_exp=''
+# No claim, no proxy: a script that declares no floor has promised nothing about where it
+# runs, and every construct below would be a finding against a promise nobody made
+if ((floor)); then
+  while IFS="$(printf '\t')" read -r need kind pat; do
+    [[ -n "$need" ]] || continue
+    ((need > floor)) || continue
+    if [[ "$kind" == cmd ]]; then
+      active_cmd="${active_cmd:+$active_cmd|}$pat"
+    else
+      active_exp="${active_exp:+$active_exp|}$pat"
+    fi
+  done <<<"$(version_rows)"
+fi
+# The userland is the other claim, and it stands on its own: bash 5 with a BSD sed around
+# it is a macOS machine, so `POSIX tools only` turns these on whatever the floor says
+if ((posix_tools)); then
+  # A bare `mktemp -d` is fine on macOS, whose page says it "behaves as if -t tmp was
+  # supplied"; the GNU flags are not, and -t means a prefix there and a template here
+  bsd='sor[t] -[A-Za-z]*V|gre[p] -[A-Za-z]*P|readlin[k] -f|dat[e] -d|mktem[p] (-[dqu]+ )*(-[pt]|--tmpdir|--suffix)'
+  # sed -i takes a suffix on BSD and none on GNU, so neither spelling runs on both
+  bsd="$bsd"'|se[d] (-[A-Za-z]+ )*-[A-Za-z]*i|se[d] [^|;]*--in-plac[e]|gre[p] [^|;]*--exclude-di[r]'
+  bsd="$bsd"'|(^|[^-A-Za-z0-9_{$])timeou[t] [0-9]|ta[r] [^|;]*--(wildcard[s]|nul[l])'
+  active_cmd="${active_cmd:+$active_cmd|}$bsd"
+fi
+# Matched in the masked text, shown as the script has it: the line numbers are the same
+show_lines() { # show_lines < LINE NUMBERS -> `LINE has: text` from the script
+  awk 'NR == FNR { want[$1]; next } FNR in want { sub(/^[[:space:]]*/, ""); print FNR " has: " $0 }' - "$code"
+}
+proxy_hits() { # proxy_hits REGEX CORPUS -> `LINE has: text` for each match outside a comment
+  [[ -n "$1" ]] || return 0
+  grep -nE "$1" "$2" | grep -vE '^[0-9]+:[[:space:]]*#' | cut -d: -f1 | show_lines || :
+}
+# A heredoc opened inside $( ), <( ) or >( ) is bash 4.0: 3.2 finds the end of the
+# substitution by scanning the heredoc's body as code, so an unpaired ' in it is a syntax
+# error and an unpaired ) ends the substitution early, and the value is quietly wrong. No
+# single line shows it — the idiom opens the substitution on the line before — so the
+# open substitutions are tracked across lines, with quotes — $'...', where \' does not
+# close the text, among them — comments, $(( )) and (( )),
+# whose << is a shift. Read in the copy with heredoc bodies blanked, where the opener
+# line stays. Backticks are left alone: 3.2 reads a heredoc inside them correctly
+heredoc_in_subst() { # heredoc_in_subst -> `LINE has: text` for each such opener
+  awk '
+    {
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (q == "\047") { if (c == "\047") q = ""; continue }
+        if (q == "$") { if (c == "\\") i++; else if (c == "\047") q = ""; continue }
+        if (c == "\\") { i++; continue }
+        if (q == "\"") {
+          if (c == "\"") q = ""
+          else if (substr($0, i, 3) == "$((") { st[++d] = "a"; st[++d] = "a"; i += 2 }
+          else if (substr($0, i, 2) == "$(") { st[++d] = "sq"; q = ""; i++ }
+          continue
+        }
+        if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[ \t;&|()]/)) break
+        if (substr($0, i, 2) == "$\047") { q = "$"; i++; continue }
+        if (c == "\047" || c == "\"") { q = c; continue }
+        if (substr($0, i, 3) == "$((" ) { st[++d] = "a"; st[++d] = "a"; i += 2; continue }
+        if (substr($0, i, 2) == "((") { st[++d] = "a"; st[++d] = "a"; i++; continue }
+        two = substr($0, i, 2)
+        if (two == "$(" || two == "<(" || two == ">(") { st[++d] = "s"; i++; continue }
+        if (c == "(") { st[++d] = "p"; continue }
+        if (c == ")") { if (d) { if (st[d] == "sq") q = "\""; d-- } continue }
+        if (two == "<<" && substr($0, i, 3) != "<<<" && (i == 1 || substr($0, i - 1, 1) != "<") &&
+          match(substr($0, i), /^<<-?[\047"]?[A-Za-z_]/)) {
+          inside = 0
+          for (k = d; k > 0; k--) {
+            if (st[k] == "a") break
+            if (st[k] ~ /^s/) { inside = 1; break }
+          }
+          if (inside) print FNR
+          i++
+        }
+      }
+    }
+  ' "$code" | show_lines || :
+}
+if [[ -n "$active_cmd$active_exp" ]]; then
+  claimed="bash ${claim#Needs bash }"
+  [[ -n "$claim" ]] || claimed="a POSIX userland"
+  while IFS= read -r hit; do
+    [[ -n "$hit" ]] || continue
+    finding "$name claims $claimed but $script:$hit — a proxy grep; the proof is a run under it"
+  done < <({
+    proxy_hits "$active_cmd" "$code_dq"
+    proxy_hits "$active_exp" "$code_sq"
+    if ((floor && floor < 400)); then heredoc_in_subst; fi
+  } | sort -n -u)
+fi
+
+# ---- a positional parameter guarded by ${N:?} ------------------------------------
+# It reads like an argument check and exits 1 with bash's own text, where a missing
+# argument is a usage error: t.sh answered 23 of them with the code a failing command
+# exits, and no literal `exit` betrayed it
+while IFS= read -r hit; do
+  [[ -n "$hit" ]] || continue
+  finding "$script:$hit — \${N:?} exits 1 with bash's message, where a missing argument is a usage error; guard it with ((\$# >= N)) || die"
+done < <(grep -nE '\$\{[0-9]+:[?]' "$code" | grep -vE '^[0-9]+:[[:space:]]*#' | sed 's/^\([0-9]*\):[[:space:]]*/\1 has: /' || :)
+
+# ---- a producer piped into a reader that stops early ------------------------------
+# `grep -q` at its match, `head` at its line, `sed q` and `awk … exit` all close the pipe
+# and the producer's next write dies of SIGPIPE, which pipefail makes the status of a
+# pipeline that did its job. It is a race rather than a certainty — bash line-buffers
+# stdout, so even a few hundred bytes leave in more than one write, and which write loses
+# is a matter of scheduling — so it survives every local run and fails once in CI
+# (pitfalls.md). The fix is to read the text with <<<, which has no producer to kill
+while IFS= read -r hit; do
+  [[ -n "$hit" ]] || continue
+  finding "$script:$hit — a reader that stops early kills its producer with SIGPIPE, and pipefail makes that the pipeline's status; feed it with <<< instead"
+done < <(grep -nE '[^|]\|[[:space:]]*(gre[p] -[a-zA-Z]*q|hea[d]( |$)|se[d] -n [^|]*[0-9]q|aw[k] [^|]*exi[t])' "$code" |
+  grep -vE '^[0-9]+:[[:space:]]*#' | sed 's/^\([0-9]*\):[[:space:]]*/\1 has: /' || :)
+
+# ---- the header comment lists nothing ---------------------------------------------
+# It says why the script exists and makes the claims; what the script accepts is the
+# help's alone. A second list beside the help falls behind it — t.sh's header did, by
+# three subcommands, before anyone noticed. A line the help's grammar would read as a
+# usage, flag or code row, or an Exit or Environment line, is such a list
+while IFS= read -r row; do
+  [[ -n "$row" ]] || continue
+  finding "$name's header comment carries a line that belongs to the help alone: $row"
+done < <(printf '%s\n' "$header" | sed 's/^# \{0,1\}//' |
+  grep -E "^ +(${name_re} |--?[a-zA-Z]|[0-9]+  )|^Exit[ :]+[0-9]|^Environment:" || :)
+
+# ---- the script parses under the bash running this checker -------------------------
+# Running the help would catch a syntax error too, but only for a script that has a
+# dispatcher to run: a plain one, checked by the proxy alone, is never executed. And on a
+# macOS runner this bash is the 3.2 a `Needs bash 3.2` claim is about, so the parse is the
+# cheapest proof that claim has. Nothing below can be trusted about a file bash cannot
+# read, so the help half is skipped once this fires
+if ! parse=$("$BASH" -n "$script" 2>&1); then
+  finding "$name does not parse under the bash running this checker: ${parse##*: }"
+  proxy_only=1
+fi
+
+# ---- the help ---------------------------------------------------------------------
+if ((! proxy_only)); then
+  # Run under the bash running this checker, not the one the shebang finds: on a macOS
+  # runner that is the 3.2 the claim is about
+  help=$("$BASH" "$script" --help 2>&1) || die "$name --help exited $? rather than printing the help:"$'\n'"$help"
+  [[ -n "$help" ]] || die "$name --help printed nothing"
+  # The help again, through the pipe `bash <(curl …)` hands bash. bash reads a script from
+  # a pipe no further than the command it runs, so a script that reads its own file finds
+  # only what follows that command: nothing when the dispatcher is last, which prints an
+  # empty help at exit 0, and the rest of its program otherwise (pitfalls.md); a heredoc
+  # is code bash has already read. A run that fails outright is a script that needs the files beside
+  # it, which says so and is no finding. The grep only names the line: `$0` is also awk's
+  # record, so no grep can decide the question, and the pipe can. A whole single-quoted
+  # word is skipped as one, since an awk program holds the `;` and `$` that end a match
+  if piped=$("$BASH" <(cat "$script") --help 2>&1) && [[ "$piped" != "$help" ]]; then
+    self_read='(sed|awk|head|tail|cat|grep|cut)[[:space:]]([^|;&$'"'"']|'"'"'[^'"'"']*'"'"')*"\$\{BASH_SOURC[E](\[0\])?\}"'
+    # `sed -n 1s…p` rather than `| head -n 1 |`: head stops reading at its line and the
+    # grep before it dies of SIGPIPE, which pipefail makes the status — swallowed by the
+    # `|| :` here, leaving the line number silently missing from the finding
+    where=$(grep -nE "$self_read" "$code" | grep -vE '^[0-9]+:[[:space:]]*#' | sed -n '1s/^\([0-9]*\):[[:space:]]*/ — line \1 has: /p' || :)
+    finding "$name --help prints other text through a pipe than from the file, at exit 0: under bash <(…) it reads its own source${where:-, by a path no grep here can name}; print the help from a heredoc"
+  fi
+  # Per-subcommand help, where the script has it: `help SUB` for each help_<sub>() it
+  # defines. Its flags are then looked for there rather than in the general help
+  corpus="$help"
+  sub_help() { # sub_help SUB -> that subcommand's help, or nothing
+    local fn="help_${1//-/_}"
+    grep -q "^${fn}() {" "$script" || return 0
+    "$BASH" "$script" help "$1" 2>/dev/null || return 0
+  }
+  for s in "${subs[@]+"${subs[@]}"}"; do
+    text=$(sub_help "$s")
+    [[ -z "$text" ]] || corpus="$corpus"$'\n'"$text"
+  done
+  # A `help codes` topic, when the script has one, is where the exit codes live
+  ! grep -q '^help_codes() {' "$script" || corpus="$corpus"$'\n'"$("$BASH" "$script" help codes 2>/dev/null || :)"
+
+  # help ⇐ dispatcher, and back
+  # `NAME sub`, with any bracketed global options between — `NAME [--vault V] sub`
+  for s in "${subs[@]+"${subs[@]}"}"; do
+    grep -qE -- "(^|[^[:alnum:]_./-])${name_re}( \[[^]]*\])* ${s}([^[:alnum:]_-]|\$)" <<<"$help" ||
+      finding "$name dispatches '$s' but its help never mentions '$name $s'"
+  done
+  while IFS= read -r s; do
+    [[ -n "$s" ]] || continue
+    known_sub "$s" || finding "$name's help lists '$name $s', which the dispatcher does not have"
+  done < <(printf '%s\n' "$help" | grep -oE "(^|[^[:alnum:]_./-])${name_re} [a-z][a-z0-9-]*" |
+    sed "s/^[^a-z]*${name_re} //" | sort -u)
+
+  # help ⇐ flags, and back
+  for f in "${flags[@]+"${flags[@]}"}"; do
+    owner="${f%%	*}"
+    flag="${f#*	}"
+    case "$flag" in -h | --help) continue ;; esac
+    if [[ "$owner" == - ]]; then
+      has_token "$flag" <<<"$help" || finding "$name accepts $flag but its help never mentions it"
+    else
+      text=$(sub_help "$owner")
+      [[ -n "$text" ]] || text="$help"
+      has_token "$flag" <<<"$text" || finding "$name $owner accepts $flag but its help never mentions it"
+    fi
+  done
+  while IFS= read -r flag; do
+    [[ -n "$flag" ]] || continue
+    known_flag "$flag" || finding "$name's help has a row for $flag, which no parser accepts"
+  done < <(printf '%s\n' "$corpus" | grep -oE '^ +--?[a-zA-Z][a-zA-Z0-9-]*(, *--?[a-zA-Z][a-zA-Z0-9-]*)*' |
+    tr ',' '\n' | tr -d ' ' | sort -u)
+
+  # help ⇐ environment variables
+  if [[ -n "$prefix" ]]; then
+    variables=0
+    while IFS= read -r var; do
+      [[ -n "$var" ]] || continue
+      variables=$((variables + 1))
+      has_token "$var" <<<"$corpus" || finding "$name reads $var but its help never mentions it"
+    done < <(grep -oE "(^|[^A-Za-z0-9_])${prefix}[A-Z0-9_]+" "$script" | sed 's/^[^A-Za-z0-9_]//' | sort -u)
+    ((variables > 0)) || finding "$name reads no $prefix variable at all — the prefix is wrong, or the extractor is"
+  fi
+
+  # help ⇐ exit codes: every literal `exit N` outside a comment must be on a line of the
+  # help that starts with Exit, or in a `  N  text` row. Only the bash shape counts — the
+  # statement ends there — so an awk program's `{ exit 1 }` inside a quoted string is not
+  # read as this script's code
+  # The Exit sentence and the line after it, since a header wraps it; a `  N  text` row
+  codes_listed=$(printf '%s\n' "$corpus" | awk '/Exit[ :]/ { print; getline; print; next } /^  [0-9]+  / { print }' |
+    grep -oE '[0-9]+' | sort -u || :)
+  while IFS= read -r n; do
+    [[ -n "$n" ]] || continue
+    grep -qx -- "$n" <<<"$codes_listed" ||
+      finding "$name exits $n but its help never lists $n on an Exit line"
+  done < <(grep -vE '^[[:space:]]*#' "$code" |
+    grep -oE '(^|[;{(&|[:space:]])exit [1-9][0-9]*[[:space:]]*(;|&&|\|\||$)' | grep -oE '[0-9]+' | sort -u)
+fi
+
+# ---- the documents ----------------------------------------------------------------
+# Back, for every document: each `NAME word` it spells is a subcommand, and each flag it
+# attaches to one is parsed by it. This is the sharp direction — a document naming a
+# subcommand that no longer exists is what the check exists to catch. Forward, only for
+# a document given with -d, one that sets out to list them: every subcommand is named
+# beside the script's name somewhere in it. A document given with -m mentions a few and
+# sends the reader to the help for the rest, which is the help doing its job
+doc_mentions_are_real() { # doc_mentions_are_real DOC -> a finding per mention that is not
+  local doc="$1" span sub flag
+  while IFS= read -r span; do
+    [[ -n "$span" ]] || continue
+    # shellcheck disable=SC2086 # the span is split into its words on purpose
+    set -- $span
+    shift # the name
+    sub=""
+    if [[ $# -gt 0 && "$1" =~ ^[a-z][a-z0-9-]*$ ]]; then
+      sub="$1"
+      known_sub "$sub" || finding "$doc names \`$name $sub\`, which $name does not have"
+      shift
+    fi
+    while (($#)); do
+      case "$1" in
+        --) break ;;
+        -[a-zA-Z]* | --[a-zA-Z]*)
+          flag="${1%%=*}"
+          known_flag "$flag" "$sub" ||
+            finding "$doc gives \`$name${sub:+ $sub}\` the flag $flag, which it does not parse"
+          ;;
+      esac
+      shift
+    done
+  done < <(grep -oE "\`${name_re}( [^\`]*)?\`" "$doc" | tr -d '`' | sort -u)
+}
+for doc in "${docs[@]+"${docs[@]}"}"; do
+  for s in "${subs[@]+"${subs[@]}"}"; do
+    grep -F -- "$name" "$doc" | has_token "$s" || finding "$doc never names $name $s"
+  done
+  doc_mentions_are_real "$doc"
+done
+for doc in "${mentions[@]+"${mentions[@]}"}"; do
+  doc_mentions_are_real "$doc"
+done
+
+# ---- the completions --------------------------------------------------------------
+if [[ -n "$comp_bash" ]]; then
+  # A file that is only ever sourced has no shebang, so its first line names the dialect
+  [[ "$(head -n 1 "$comp_bash")" == "# shellcheck shell=bash" ]] ||
+    finding "$comp_bash does not open with \`# shellcheck shell=bash\`, the dialect line a sourced file needs"
+  offered_words "$comp_bash" 0 >"$work/offered.bash"
+  offered_words "$comp_zsh" 1 >"$work/offered.zsh"
+  for f in "$comp_bash" "$comp_zsh"; do
+    words="$work/offered.bash"
+    [[ "$f" == "$comp_bash" ]] || words="$work/offered.zsh"
+    for s in "${subs[@]+"${subs[@]}"}"; do
+      has_token "$s" <"$words" || finding "$s is dispatched by $name but absent from $f"
+    done
+    for e in "${flags[@]+"${flags[@]}"}"; do
+      flag="${e#*	}"
+      case "$flag" in -h | --help) continue ;; esac
+      has_token "$flag" <"$words" || finding "$flag is parsed by $name but absent from $f"
+    done
+  done
+  offered=0
+  while IFS= read -r flag; do
+    [[ -n "$flag" ]] || continue
+    offered=$((offered + 1))
+    known_flag "$flag" || finding "$flag is offered by a completion but not parsed by $name"
+  done < <(grep -ohE -- '--[a-z][a-z0-9-]+' "$work/offered.bash" "$work/offered.zsh" | sort -u)
+  ((offered > 0)) || finding "neither completion offers a single --flag — the extractor is broken, or the files are"
+fi
+
+((findings == 0)) || exit 1
+
+# ---- every check above is able to fail --------------------------------------------
+# The canonical script above, its document and its completions pass as they are; then
+# one copy per check gets one defect and this same script must go red for that defect's
+# own reason, since a gate whose findings all come from one over-broad branch reads as
+# thorough while testing one thing. A nested run skips this section.
+
+if [[ -n "${CHECK_SH_NESTED:-}" ]]; then
+  exit 0
+fi
+
+canon="$work/canon"
+mkdir -p "$canon"
+template_script >"$canon/script.sh"
+template_bash >"$canon/script.sh.bash"
+template_zsh >"$canon/_script.sh"
+cat >"$canon/README.md" <<'EOF'
+# script.sh
+
+| Command | What it does |
+|---|---|
+| `script.sh run -n` | says what would be done |
+| `script.sh stop` | stops it |
+
+```
+script.sh   the tool: run / stop
+```
+EOF
+
+nested() { # nested DIR [ARGS...] -> this script on DIR's copy, falsification skipped
+  local d="$1"
+  shift
+  CHECK_SH_NESTED=1 "$BASH" "$self" "$@"
+}
+copy() { # copy NAME -> a fresh copy of the canon
+  local c="$work/$1"
+  mkdir -p "$c"
+  cp "$canon"/* "$c/"
+  printf '%s\n' "$c"
+}
+full() { # full DIR -> the arguments that check everything in DIR
+  printf -- '-n script.sh -e SCRIPT_ -d %s/README.md -c %s/script.sh.bash %s/_script.sh %s/script.sh\n' "$1" "$1" "$1" "$1"
+}
+planted=0
+# The count lives here rather than beside each call, so a new planted case cannot be left
+# out of the number the summary line reports
+expect_red() { # expect_red DIR FRAGMENT WHAT [ARGS...]
+  local d="$1" want="$2" what="$3" out
+  shift 3
+  if out=$(nested "$d" "$@" 2>&1); then
+    die "self-test: a copy with $what passed — the check cannot catch it"
+  fi
+  case "$out" in
+    *"$want"*) ;;
+    *) die "self-test: a copy with $what was rejected for the wrong reason: $out" ;;
+  esac
+  planted=$((planted + 1))
+}
+# A copy that must pass is run once, and that run's own output and status are the report.
+# A second run for the message would describe itself: a failure that does not repeat left
+# an empty reason on a macOS runner, and nothing to find the cause by
+expect_green() { # expect_green DIR WHAT [ARGS...]
+  local d="$1" what="$2" out status=0
+  shift 2
+  out=$(nested "$d" "$@" 2>&1) || status=$?
+  ((status == 0)) ||
+    die "self-test: $what was rejected with exit $status — the checker is broken, not the script:"$'\n'"$out"
+}
+# The constructs planted below are spelled in two halves, so this file's own claim of
+# bash 3.2 is not contradicted by its own self-test
+# Through the environment rather than -v: awk reads escape sequences in a -v value, so a
+# planted line holding a backslash would arrive changed
+plant() { # plant DIR AFTER-PATTERN LINE -> the line inserted after the first match
+  PAT="$2" LINE="$3" awk '{ print } !done && index($0, ENVIRON["PAT"]) == 1 { print ENVIRON["LINE"]; done = 1 }' "$1/script.sh" >"$1/script.sh.new"
+  mv "$1/script.sh.new" "$1/script.sh"
+}
+swap() { # swap DIR PATTERN LINE -> the first line starting with PATTERN replaced
+  PAT="$2" LINE="$3" awk '!done && index($0, ENVIRON["PAT"]) == 1 { print ENVIRON["LINE"]; done = 1; next } { print }' "$1/script.sh" >"$1/script.sh.new"
+  mv "$1/script.sh.new" "$1/script.sh"
+}
+replace_usage() { # replace_usage DIR LINE -> usage() and its heredoc replaced by LINE
+  LINE="$2" awk '/^usage\(\) \{$/ { print ENVIRON["LINE"]; skip = 1; next } skip && /^}$/ { skip = 0; next } skip { next } { print }' "$1/script.sh" >"$1/script.sh.new"
+  mv "$1/script.sh.new" "$1/script.sh"
+}
+
+c=$(copy faithful)
+# shellcheck disable=SC2046 # full() prints the arguments, split on purpose
+expect_green "$c" "the canonical script" $(full "$c")
+
+c=$(copy nothing)
+printf '#!/usr/bin/env bash\necho hi\n' >"$c/script.sh"
+status=0
+out=$(nested "$c" "$c/script.sh" 2>&1) || status=$?
+((status == 2)) || die "self-test: a script with nothing to check was not refused (got $status): $out"
+case "$out" in *"nothing to check"*) ;; *) die "self-test: a script with nothing to check was refused for the wrong reason: $out" ;; esac
+planted=$((planted + 1))
+
+c=$(copy plain-claimed)
+# A plain script with no dispatcher and no flag, whose header claims bash 3.2, is checked
+# by the proxy alone: clean it passes, with a bash 4 construct it goes red
+printf '#!/usr/bin/env bash\n# Needs bash 3.2 and POSIX tools only.\necho hi\n' >"$c/plain.sh"
+nested "$c" "$c/plain.sh" >/dev/null 2>&1 || die "self-test: a plain script claiming bash 3.2 was refused rather than checked by the proxy"
+printf 'false && declar''e -A m\n' >>"$c/plain.sh"
+expect_red "$c" "claims bash 3.2 but $c/plain.sh:" "a bash 4 construct in a plain script claiming 3.2" "$c/plain.sh"
+
+c=$(copy helper-case)
+# A case inside a helper function is not a parser of this script's flags
+# shellcheck disable=SC2016 # the $1 belongs to the helper being written out
+plant "$c" 'HERE=' 'helper() { case "$1" in --inner) : ;; esac; }'
+# shellcheck disable=SC2046
+nested "$c" $(full "$c") >/dev/null 2>&1 || die "self-test: a case in a helper function was read as a parser"
+
+c=$(copy wrapper)
+# A dispatcher whose *) arm passes the word through is a wrapper, and a wrapper's help may
+# name the commands of the tool behind it
+awk '/^  \*\)$/ { print "  *) printf '"'"'passing %s through\\n'"'"' \"$cmd\" ;; # pass-through"; skip = 1; next } skip && /^    ;;$/ { skip = 0; next } skip { next } { print }' "$c/script.sh" >"$c/s" && mv "$c/s" "$c/script.sh"
+plant "$c" '  script.sh stop' '  script.sh anything                       passed through to the tool behind'
+# shellcheck disable=SC2016 # the backticks are markdown, not a command substitution
+printf '\nAlso `script.sh anything` goes through\n' >>"$c/README.md"
+# shellcheck disable=SC2046
+expect_green "$c" "a wrapper's help naming a passed-through command" $(full "$c")
+
+c=$(copy bracketed)
+# A global option in brackets between the name and the subcommand is still `NAME sub`
+swap "$c" '  script.sh stop' '  script.sh [--quiet] stop                 stop doing it'
+# shellcheck disable=SC2046
+nested "$c" $(full "$c") >/dev/null 2>&1 || die "self-test: a help spelling 'script.sh [--quiet] stop' was read as not naming stop"
+
+c=$(copy unclaimed)
+# The proxy is gated on the claim: a script that does not claim 3.2 may use bash 4
+# The claim as the check finds it, not the template's whole line, which is then free to change
+sed 's/^\(# .*\)Needs bash 3\.2.*$/\1Needs bash 4./' "$c/script.sh" >"$c/s" && mv "$c/s" "$c/script.sh"
+plant "$c" 'HERE=' 'false && declar'"e -A m"
+# shellcheck disable=SC2046
+nested "$c" $(full "$c") >/dev/null 2>&1 || die "self-test: a bash 4 construct was flagged in a script that claims no bash 3.2"
+
+c=$(copy new-arm)
+# shellcheck disable=SC2016 # the $cmd is the dispatcher's, matched literally
+plant "$c" 'case "$cmd" in' '  planted) : ;;'
+expect_red "$c" "dispatches 'planted' but its help never mentions 'script.sh planted'" "a subcommand missing from the help" -n script.sh "$c/script.sh"
+
+c=$(copy ghost-sub)
+plant "$c" '  script.sh stop' '  script.sh ghost                          a subcommand that is not there'
+expect_red "$c" "help lists 'script.sh ghost', which the dispatcher does not have" "a subcommand the help invents" -n script.sh "$c/script.sh"
+
+c=$(copy new-flag)
+# shellcheck disable=SC2016 # the $1 is the parser's, matched literally
+plant "$c" '    case "$1" in' '      --planted) shift ;;'
+expect_red "$c" "script.sh run accepts --planted but its help never mentions it" "a flag missing from the help" -n script.sh "$c/script.sh"
+
+c=$(copy ghost-flag)
+plant "$c" '  -l DIR' '  --ghost         a flag no parser accepts'
+expect_red "$c" "help has a row for --ghost, which no parser accepts" "a flag the help invents" -n script.sh "$c/script.sh"
+
+c=$(copy new-variable)
+# shellcheck disable=SC2016 # the expansion belongs to the script being written out
+plant "$c" 'HERE=' ': "${SCRIPT_PLANTED:-}"'
+expect_red "$c" "reads SCRIPT_PLANTED but its help never mentions it" "a variable missing from the help" -n script.sh -e SCRIPT_ "$c/script.sh"
+
+c=$(copy no-variable)
+expect_red "$c" "reads no NOPE_ variable at all" "a prefix nothing is read with" -n script.sh -e NOPE_ "$c/script.sh"
+
+c=$(copy new-code)
+plant "$c" 'HERE=' 'false && exi'"t 97"
+expect_red "$c" "exits 97 but its help never lists 97" "an exit code missing from the help" -n script.sh "$c/script.sh"
+
+c=$(copy self-read-sed)
+# A usage() printing its help back out of its own file, as the family's did. The text is
+# the canon's own help as `#>` lines under the shebang, so from the file every other
+# check passes, and `#>` is no row the header check reads. Through a pipe bash has read
+# those lines long before the dispatcher runs, so the reader finds them gone and prints
+# nothing at exit 0. Spelled in two halves so this file's own source reads nothing of
+# itself
+canon_help=$("$BASH" "$canon/script.sh" --help | sed 's/^/#> /')
+# shellcheck disable=SC2016 # the expansion belongs to the usage() being written out
+replace_usage "$c" 'usage() { sed -n '"'"'s/^#> \{0,1\}//p'"'"' "${BASH_SOUR''CE[0]}"; }'
+plant "$c" '#!/usr/bin/env bash' "$canon_help"
+expect_red "$c" "has: usage() { sed -n" "a usage() printing its help back with sed" -n script.sh "$c/script.sh"
+
+c=$(copy self-read-dollar0)
+# $0 names the file too, and in awk it is also the record, so no grep can tell the two
+# apart; the pipe can. The finding carries no line then, and the fragment says so
+# shellcheck disable=SC2016 # the expansion belongs to the usage() being written out
+replace_usage "$c" 'usage() { awk '"'"'sub(/^#> ?/, "")'"'"' "$0"; }'
+plant "$c" '#!/usr/bin/env bash' "$canon_help"
+expect_red "$c" "it reads its own source, by a path no grep here can name" "a usage() printing its help back with awk on \$0" -n script.sh "$c/script.sh"
+
+c=$(copy needs-its-directory)
+# A script that needs a file beside it fails outright through a pipe: that is no finding,
+# since it cannot run that way at all and says so
+# shellcheck disable=SC2016 # the expansion belongs to the script being written out
+plant "$c" 'HERE=' 'cat "$HERE/script.sh.bash" >/dev/null'
+# shellcheck disable=SC2046
+expect_green "$c" "a script that fails outright through a pipe" $(full "$c")
+
+c=$(copy header-usage)
+plant "$c" '#!/usr/bin/env bash' '#   script.sh stop                           stop doing it'
+expect_red "$c" "belongs to the help alone:   script.sh stop" "a usage line in the header comment" -n script.sh "$c/script.sh"
+
+c=$(copy header-flag)
+plant "$c" '#!/usr/bin/env bash' '#   -l DIR          the log directory'
+expect_red "$c" "belongs to the help alone:   -l DIR" "a flag row in the header comment" -n script.sh "$c/script.sh"
+
+c=$(copy header-exit)
+plant "$c" '#!/usr/bin/env bash' '# Exit 0 done, 2 on a usage error'
+expect_red "$c" "belongs to the help alone: Exit 0" "an Exit line in the header comment" -n script.sh "$c/script.sh"
+
+c=$(copy no-help-arm)
+swap "$c" '  -h | --help | help) usage ;;' '  --help) usage ;;'
+expect_red "$c" "has no -h | --help | help arm" "a dispatcher without a help arm" -n script.sh "$c/script.sh"
+
+c=$(copy quiet-refusal)
+# Every redirection inside the *) arm dropped, so the refusal goes to stdout
+awk '/^  \*\)$/ { inarm = 1 } inarm { gsub(/ >&2/, "") } /;;/ { inarm = 0 } { print }' "$canon/script.sh" >"$c/script.sh"
+expect_red "$c" "prints its usage to stdout rather than stderr" "a refusal that goes to stdout" -n script.sh "$c/script.sh"
+
+c=$(copy doc-missing)
+grep -v 'stop' "$canon/README.md" >"$c/README.md"
+expect_red "$c" "README.md never names script.sh stop" "a document that lost a subcommand" -n script.sh -d "$c/README.md" "$c/script.sh"
+
+c=$(copy doc-ghost)
+# shellcheck disable=SC2016 # the backticks are markdown, not a command substitution
+printf '\nAlso `script.sh ghost` for the thing that is not there\n' >>"$c/README.md"
+expect_red "$c" "README.md names \`script.sh ghost\`, which script.sh does not have" "a document naming a subcommand that is not there" -n script.sh -d "$c/README.md" "$c/script.sh"
+
+c=$(copy doc-ghost-flag)
+# shellcheck disable=SC2016 # the backticks are markdown, not a command substitution
+printf '\nAnd `script.sh run --ghost` for the flag that is not there\n' >>"$c/README.md"
+expect_red "$c" "gives \`script.sh run\` the flag --ghost, which it does not parse" "a document attaching a flag that is not parsed" -n script.sh -d "$c/README.md" "$c/script.sh"
+
+c=$(copy mention-partial)
+# A document that mentions one subcommand and sends the reader to the help for the rest
+# is not held to naming them all
+# shellcheck disable=SC2016 # the backticks are markdown, not a command substitution
+printf 'Run `script.sh stop` to stop it; `script.sh help` has the rest\n' >"$c/NOTE.md"
+nested "$c" -n script.sh -m "$c/NOTE.md" "$c/script.sh" >/dev/null 2>&1 ||
+  die "self-test: a document given with -m was held to naming every subcommand"
+
+c=$(copy mention-ghost)
+# shellcheck disable=SC2016 # the backticks are markdown, not a command substitution
+printf 'Run `script.sh ghost` to stop it\n' >"$c/NOTE.md"
+expect_red "$c" "NOTE.md names \`script.sh ghost\`, which script.sh does not have" "a mention of a subcommand that is not there" -n script.sh -m "$c/NOTE.md" "$c/script.sh"
+
+c=$(copy comp-bash-missing)
+sed 's/--dry-run//' "$canon/script.sh.bash" >"$c/script.sh.bash"
+expect_red "$c" "--dry-run is parsed by script.sh but absent from $c/script.sh.bash" "a bash completion missing a flag" -n script.sh -c "$c/script.sh.bash" "$c/_script.sh" "$c/script.sh"
+
+c=$(copy comp-zsh-missing)
+grep -v "'stop:" "$canon/_script.sh" >"$c/_script.sh"
+expect_red "$c" "stop is dispatched by script.sh but absent from $c/_script.sh" "a zsh completion missing a subcommand" -n script.sh -c "$c/script.sh.bash" "$c/_script.sh" "$c/script.sh"
+
+c=$(copy comp-ghost)
+sed 's/words="-n --dry-run -l"/words="-n --dry-run -l --ghost"/' "$canon/script.sh.bash" >"$c/script.sh.bash"
+expect_red "$c" "--ghost is offered by a completion but not parsed by script.sh" "a completion offering a flag that is not parsed" -n script.sh -c "$c/script.sh.bash" "$c/_script.sh" "$c/script.sh"
+
+c=$(copy comp-comment)
+# A word that survives only in a comment is not offered
+sed 's/words="-n --dry-run -l"/words="-n -l" # --dry-run is left out/' "$canon/script.sh.bash" >"$c/script.sh.bash"
+expect_red "$c" "--dry-run is parsed by script.sh but absent from $c/script.sh.bash" "a flag named only in a comment of the bash completion" -n script.sh -c "$c/script.sh.bash" "$c/_script.sh" "$c/script.sh"
+
+c=$(copy comp-description)
+# A subcommand that survives only in another entry's description is not offered
+grep -v "'stop:" "$canon/_script.sh" | sed "s/'run:do the thing'/'run:do the thing, or stop it'/" >"$c/_script.sh"
+expect_red "$c" "stop is dispatched by script.sh but absent from $c/_script.sh" "a subcommand named only in a zsh description" -n script.sh -c "$c/script.sh.bash" "$c/_script.sh" "$c/script.sh"
+
+c=$(copy comp-bracket)
+# A flag that survives only in the [...] text of another option is not offered
+sed "s/'(-n --dry-run)'{-n,--dry-run}'\[say what would be done\]'/'-n[say what would be done, as --dry-run does]'/" "$canon/_script.sh" >"$c/_script.sh"
+expect_red "$c" "--dry-run is parsed by script.sh but absent from $c/_script.sh" "a flag named only in a zsh option description" -n script.sh -c "$c/script.sh.bash" "$c/_script.sh" "$c/script.sh"
+
+c=$(copy comp-case-arm)
+# A flag dropped from the offered list survives in the case arm that handles its value
+sed 's/words="-n --dry-run -l"/words="-n --dry-run"/' "$canon/script.sh.bash" >"$c/script.sh.bash"
+expect_red "$c" "-l is parsed by script.sh but absent from $c/script.sh.bash" "a flag left only as a case pattern of the bash completion" -n script.sh -c "$c/script.sh.bash" "$c/_script.sh" "$c/script.sh"
+
+c=$(copy comp-wrapped-list)
+# The last line of an offered list wrapped onto two ends in `)` inside a case arm, and is
+# still an offer rather than a pattern: two consumers wrap their flag arrays this way
+awk '/words="-n --dry-run -l"/ { sub(/words="-n --dry-run -l"/, "local -a w=(-n"); print; print "          --dry-run -l)"; next } { print }' "$canon/script.sh.bash" >"$c/script.sh.bash"
+expect_green "$c" "a flag list wrapped onto a second line ending in )" -n script.sh -c "$c/script.sh.bash" "$c/_script.sh" "$c/script.sh"
+
+c=$(copy comp-dialect)
+tail -n +2 "$canon/script.sh.bash" >"$c/script.sh.bash"
+expect_red "$c" "does not open with" "a bash completion without its dialect line" -n script.sh -c "$c/script.sh.bash" "$c/_script.sh" "$c/script.sh"
+
+c=$(copy param-guard)
+# Spelled in two halves, so this file's own source holds no such guard
+# shellcheck disable=SC2016 # the expansion belongs to the script being written out
+plant "$c" 'HERE=' 'x="${1'':?a value}"'
+expect_red "$c" "exits 1 with bash's message" "a positional parameter guarded by \${N:?}" -n script.sh "$c/script.sh"
+
+c=$(copy comp-action)
+# The action of an `N:message:action` spec is what zsh offers, and it counts
+awk '/^  local -a subcommands$/ { skip = 1 } skip && /^  \)$/ { skip = 0; next } skip { next } { print }' "$canon/_script.sh" |
+  sed "s/'1:subcommand:->subcommand'/'1:subcommand:(run stop help)'/; s/subcommand) _describe 'subcommand' subcommands ;;/subcommand) ;;/" >"$c/_script.sh"
+expect_green "$c" "a zsh completion offering its subcommands as an action list" -n script.sh -c "$c/script.sh.bash" "$c/_script.sh" "$c/script.sh"
+
+c=$(copy heredoc-in-quotes)
+# A `<<WORD` inside quotes is text, not a heredoc: read as one, it blanked the rest of the
+# file, and every subcommand and flag after it vanished from what the checker saw, so
+# the readme named subcommands the script no longer had
+plant "$c" 'HERE=' "note=\"cat <<'NOPE' is text\""
+plant "$c" 'HERE=' "note='and so is <<NOPE'"
+# shellcheck disable=SC2046
+expect_green "$c" "a copy holding <<WORD inside quotes" $(full "$c")
+
+c=$(copy literal-bash4)
+# A bash 4 construct inside single quotes is text, which a 3.2 parses happily: the proxy
+# reads what a script would run, and a single-quoted string runs nothing
+plant "$c" 'HERE=' "note='declar""e -A is bash 4'"
+expect_green "$c" "a copy naming a bash 4 construct inside single quotes" -n script.sh "$c/script.sh"
+
+c=$(copy literal-bash4-double)
+# The same inside double quotes, which is where a message says it: a gate proving a bash
+# is 3.2 has to print the construct's name, and the proxy read that sentence as a use
+plant "$c" 'HERE=' "note=\"this bash accepts declar""e -A\""
+expect_green "$c" "a copy naming a bash 4 construct inside double quotes" -n script.sh "$c/script.sh"
+
+c=$(copy claimed-bash4)
+plant "$c" 'HERE=' 'false && declar'"e -A m"
+expect_red "$c" "claims bash 3.2 but $c/script.sh:" "a bash 4 construct under a 3.2 claim" -n script.sh "$c/script.sh"
+
+c=$(copy heredoc-in-subst)
+# The idiom opens the substitution on the line before the heredoc, where no one-line
+# pattern sees both; bash -n under 3.2 passes it, having read the body as code
+plant "$c" 'HERE=' "x=\"\$(
+  cat <<'X'
+a ) b
+X
+)\""
+expect_red "$c" "claims bash 3.2 but $c/script.sh:$(($(grep -n '^HERE=' "$c/script.sh" | cut -d: -f1) + 2)) has: cat <<'X'" "a heredoc inside \$( ) under a 3.2 claim" -n script.sh "$c/script.sh"
+
+c=$(copy heredoc-after-ansi-c)
+# In $'...' a backslash escapes the quote, so \' leaves the text open: read as a plain
+# single-quoted text it closes there, and every quote after it is read the other way round
+plant "$c" 'HERE=' "s=\$'it\\'s'
+x=\$(cat <<X
+a
+X
+)"
+expect_red "$c" "has: x=\$(cat <<X" "a heredoc inside \$( ) after a \$'...' holding \\' under a 3.2 claim" -n script.sh "$c/script.sh"
+
+c=$(copy bash4-after-ansi-c)
+# The masked copies the proxy reads track quotes the same way, and the construct after
+# such a text was blanked as if it were quoted
+plant "$c" 'HERE=' "s=\$'it\\'s'
+false && declar"'e -A m'
+expect_red "$c" "has: false && declar"'e -A m' "a bash 4 construct after a \$'...' holding \\' under a 3.2 claim" -n script.sh "$c/script.sh"
+
+c=$(copy heredoc-in-procsubst)
+plant "$c" 'HERE=' 'while read -r l; do :; done < <(cat <<X
+a
+X
+)'
+expect_red "$c" "has: while read -r l; do :; done < <(cat <<X" "a heredoc inside <( ) under a 3.2 claim" -n script.sh "$c/script.sh"
+
+c=$(copy heredoc-beside-subst)
+# What reads like one and is not: a shift inside $(( )), a here-string, a ( inside a
+# string inside $( ), a heredoc once the substitution has closed, and one in backticks
+plant "$c" 'HERE=' "n=\$(echo \$((1<<k)))
+x=\$(tr a b <<<word)
+y=\"\$(echo \"(\")\"; cat <<X >/dev/null
+b
+X
+z=\`cat <<X
+c
+X
+\`"
+expect_green "$c" "a copy with a shift, a here-string and heredocs outside any \$( )" -n script.sh "$c/script.sh"
+
+c=$(copy unparsable)
+# A file bash cannot read at all: the help run would catch it only where there is a
+# dispatcher to run, and the message would name the help rather than the syntax
+printf 'if then\n' >>"$c/script.sh"
+expect_red "$c" "does not parse under the bash running this checker" "a script with a syntax error" -n script.sh "$c/script.sh"
+
+c=$(copy early-reader)
+# A text piped into a reader that stops early: the spelling is split so this file's own
+# check does not match the line that plants it
+plant "$c" 'HERE=' 'printf "%s\n" here | gre''p -q x || :'
+expect_red "$c" "a reader that stops early kills its producer" "a text piped into grep -q" -n script.sh "$c/script.sh"
+
+c=$(copy claimed-gnu-mktemp)
+# shellcheck disable=SC2016 # the substitution belongs to the script being written out
+plant "$c" 'HERE=' 'x=$(mktem'"p -d -p /tmp)"
+expect_red "$c" "has: x=\$(mktem""p -d -p /tmp)" "a GNU mktemp flag under a 3.2 claim" -n script.sh "$c/script.sh"
+
+printf 'check-sh: %s — %d subcommands, %d flags agree with the help; %d document(s), %s completions checked; %d planted defects caught\n' \
+  "$name" "${#subs[@]}" "${#flags[@]}" "$((${#docs[@]} + ${#mentions[@]}))" "$([[ -n "$comp_bash" ]] && echo 2 || echo 0)" "$planted"

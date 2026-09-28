@@ -20,7 +20,7 @@ keystream_byte_i = top_byte(s + C_i), i = 0..15
 plaintext = ciphertext XOR keystream
 ```
 
-Значения `C_i` и остальные параметры находятся в одном источнике — [`decrypt_storage.py`](decrypt_storage.py). Высокая энтропия области хранилища видна на [снимке DiE](entropy-die.png), но сама по себе не доказывает именно шифрование; проверка — корректный результат расшифровки ниже
+Значения `C_i` и остальные параметры находятся в одном источнике — [`decrypt_storage.py`](src/decrypt_storage.py). Высокая энтропия области хранилища видна на [снимке DiE](out/entropy-die.png), но сама по себе не доказывает именно шифрование; проверка — корректный результат расшифровки ниже
 
 ```mermaid
 flowchart TD
@@ -44,11 +44,11 @@ flowchart TD
 Из корня репозитория на исходном образе:
 
 ```sh
-python3 attack1/decrypt_storage.py artifacts/backup_full.bin /tmp/storage_decrypted.img
+python3 attack1/src/decrypt_storage.py artifacts/backup_full.bin /tmp/storage_decrypted.img
 MTOOLS_SKIP_CHECK=1 mdir -i /tmp/storage_decrypted.img ::/
 ```
 
-Дешифратор создаёт образ FAT12 объёмом 704 КиБ. Для независимой проверки архива запустите `python3 artifacts/prepare.py artifacts/backup_full.bin --verify`: стенд повторяет расшифровку, извлекает ZIP через `mcopy`, проверяет CRC и сравнивает его с сохранённым архивом. Зависимости и происхождение артефактов — в [`artifacts/README.md`](../artifacts/README.md)
+Дешифратор создаёт образ FAT12 объёмом 704 КиБ. Для независимой проверки архива `python3 artifacts/prepare.py artifacts/backup_full.bin --verify`: стенд повторяет расшифровку, извлекает ZIP через `mcopy`, проверяет CRC и сравнивает его с сохранённым архивом. Зависимости и происхождение артефактов — в [`artifacts/README.md`](../artifacts/README.md)
 
 ## Оценка атаки
 
@@ -60,12 +60,10 @@ MTOOLS_SKIP_CHECK=1 mdir -i /tmp/storage_decrypted.img ::/
 
 ### Как исправить
 
-Секрет шифрования нельзя хранить в читаемой внешней флеш-памяти вместе с данными. Устройство с аппаратной защитой чтения и отдельным секретом может связать ключ с PIN через KDF; для четырёхзначного PIN необходим также механизм ограничения офлайн-перебора. Для защиты целостности тома требуется аутентифицированное шифрование, см. [вектор 2](../attack2/README.md)
+Не хранить секрет шифрования в читаемой внешней флеш-памяти вместе с данными
 
 ## Доказательство работоспособности
 
-- При запуске на [`artifacts/backup_full.bin`](../artifacts/backup_full.bin) PoC выдаёт начало загрузочного сектора `EB 3C 90 4D 53 44 4F 53 35 2E 30`, сигнатуру `55 AA` и образ объёмом 720 896 байт; полный сохранённый протокол — [`demo_output.txt`](demo_output.txt)
+- При запуске на [`artifacts/backup_full.bin`](../artifacts/backup_full.bin) PoC выдаёт начало загрузочного сектора `EB 3C 90 4D 53 44 4F 53 35 2E 30`, сигнатуру `55 AA` и образ объёмом 720 896 байт; полный сохранённый протокол — [`demo_output.txt`](out/demo_output.txt)
 - `file` распознаёт FAT12, а `mdir` показывает в корне `your_prize.zip`; [`artifacts/prepare.py`](../artifacts/prepare.py) извлекает архив и проверяет CRC и совпадение с [`artifacts/your_prize.zip`](../artifacts/your_prize.zip)
 - `python3 -m unittest discover -s attack1 -p 'test_*.py' -v` проверяет загрузочный сектор реального дампа и отбрасывает усечённый образ
-
-Расшифровка, проверка FAT и чтение ZIP выполнены на сохранённом дампе, а не на USB-MSC интерфейсе устройства. Поведение программы при вводе PIN этот стенд не измеряет

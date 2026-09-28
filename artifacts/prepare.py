@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 ARTIFACTS = Path(__file__).resolve().parent
-DECRYPTOR = ARTIFACTS.parent / "attack1" / "decrypt_storage.py"
+DECRYPTOR = ARTIFACTS.parent / "attack1" / "src" / "decrypt_storage.py"
 
 
 def sha256(path):

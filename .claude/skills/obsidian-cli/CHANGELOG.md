@@ -1,0 +1,148 @@
+# Changelog
+
+Kept in the shape of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), dated rather than numbered, and with no `Unreleased` section — this repository is read at whatever revision you have checked out, so whatever is on the default branch is what every reader already has
+
+## 2026-09-18
+
+### Added
+
+- the dev shell carries `jq`, ahead of the checker that will need it: the vendored `check-sh.sh` is moving off its awk lexer to reading the script it is given as a tree, out of `shfmt --to-json`, with jq flattening that tree into the rows its rules read. It lands before the cascade delivers that checker, so a new copy does not arrive to a missing tool and a red verify
+
+### Fixed
+
+- `obsi.sh`'s header names `base64`, which it has always called to embed a path in the JavaScript it sends the app. The header claimed a POSIX userland and nothing else, and `base64` is not in POSIX.1, so a reader provisioning for it was told one dependency short
+
+## 2026-09-17
+
+### Added
+
+- A `macos` workflow and badge: `obsi.sh` claims bash 3.2 and a POSIX userland, and the behaviour half of the gate now runs under the `/bin/bash` 3.2 and BSD tools of a macOS runner, with node alone from the locked nixpkgs. It first proves the bash asked is that 3.2 — `CHECK_BASH32=1` checks the version and requires a copy of `obsi.sh` declaring an associative array to fail the suite there
+- `check-obsi.sh --help`, which the synopsis and exit codes moved to from its header comment
+- `references/commands.md`: editing the middle of a note through `eval`, which `append`, `prepend` and `create … overwrite` cannot — `app.vault.process` rewrites the file through the app, the code refuses unless the old text occurs exactly once, and the texts travel base64-encoded like the path before them
+
+### Changed
+
+- `check.sh` takes `lint`, `behaviour` or `all`, the default: the behaviour half needs only bash and node, so it can run where the lint tools are not. `check-obsi.sh` runs `obsi.sh` under `"$BASH"` rather than through its shebang, which finds whichever bash is first on PATH, Homebrew's 5 on a Mac that has one
+
+## 2026-09-16
+
+### Changed
+
+- `check-obsi.sh` no longer plants its own defects into copies of `obsi.sh`: every one of them has an entry in `tests/defects.sh` held to the same check with `expect caught`, so the gate runs the suite once and `t.sh falsify -- ./check-obsi.sh .` is the proof that its checks can fail, on every push to master. `CHECK_OBSI_NESTED` and `OBSI_UNDER_TEST` are gone
+- `check-obsi.sh` checks that `find --prop` naming a property no note has answers `No matches found.` even when the index and the text both matched, and `obsi.sh` drops the shortcut that was meant to answer it early and never ran
+
+## 2026-09-15
+
+### Added
+
+- `tests/defects.sh`, the defect list the tests skill's `t.sh falsify` reads: one entry per guard of `obsi.sh`, run against `CHECK_OBSI_NESTED=1 ./check-obsi.sh .`, and every entry is caught or declared unobservable. `check-obsi.sh` now runs every graph query and the `--prop` query in node against the fake vault, which gained an image link, a broken link, a number in an alias list, a tag with a trailing slash and a capitalised tag spelling from `getTags`; it also checks each count's call site, the refusals' own messages, the discovery order and a client that exits non-zero. The stub cuts `search` to its `limit=`, the way the CLI does
+- `.github/workflows/falsify.yml` runs `tests/defects.sh` on every push to master and by hand, so a guard of `obsi.sh` the suite stops noticing turns CI red; `t.sh` and its markers are vendored from the [tests](https://github.com/rokokol/tests-skill) skill into `tests/`, and `tests/t.conf` names `check-obsi.sh` as a test file, so `t.sh prove` keeps it when it takes a fix away
+
+### Changed
+
+- `obsi.sh` exits 2 on every usage error, as its help says — an unknown option or graph query, a count that is not a positive number, a missing value, a word a command does not take, a vault named after the command word — and keeps 1 for an answer from the CLI or the vault; these exited 1 before
+- `obsi.sh` prints its help from a heredoc instead of reading its own header back, which under `bash <(…)` is the pipe bash reads the script from and printed nothing; the network, bash and Obsidian claims stay in the header comment and are no longer part of `--help`
+- the wrong calls the docs show on purpose, `fil=` and `format=` on `aliases`, are excused in `check-interface.allow`, which no agent loads, rather than by a `check-interface: allow` comment in `SKILL.md` and the references, which every invocation loaded; the vendored `check-interface.sh`, `check-skill.sh` and `check-changelog.sh` take their current revisions
+- `check-skill.sh` is vendored from the [skill-authoring](https://github.com/rokokol/skill-authoring-skill) skill, where the rules it checks now live, and reports the rules a skill can break without breaking as warnings on stdout, the exit code unchanged: a `Layout` or install section in runtime, `used to`, a `path:line` citation, a link to a sibling skill, a concrete model id, and the rest its `--help` lists
+- `obsi.sh`'s header now keeps only what an editor needs and its `--help` carries everything a caller acts on, the network and the running-Obsidian facts both, which an entry earlier today left in the header; `check.sh`, the gate, answers `--help` too, with what it needs, the network fact and its exit codes
+
+### Fixed
+
+- a refusal the Obsidian CLI prints for the query `obsi.sh` hands to the app no longer ends at exit 0, where `find` said No matches found and `graph dump` replaced an existing file with an empty one: it exits 1 with the CLI's message, like every other refusal
+- `obsi.sh graph summary`, `hubs`, `ends`, `unresolved`, `components` and `related` refuse a word they do not take, where they dropped it and answered as though it had not been typed
+- `check-obsi.sh` no longer hangs when its own stdin is neither a terminal nor at its end, such as a socket an agent's shell leaves open: its planted-defect pass ran each nested copy on that stdin, so with the stdin guard planted out the stub's `cat` waited on it for ever. Each nested run now reads `/dev/null`, and the read-loop check, which supplies its own stdin, is what catches the planted guard
+
+## 2026-09-12
+
+### Added
+
+- a command the Obsidian CLI stops declaring is a finding wherever the docs still name it, a bare span included. Such a span is otherwise taken for prose, since a hundred-odd spans here open with words that were never commands, so a renamed command went unnoticed there. The gate reads every earlier recording of `tests/obsidian-help.txt` from its git history and passes the commands they declared to `check-interface.sh -r`; the build workflow checks out the whole history for it, and a shallow clone is refused rather than passed
+
+## 2026-09-11
+
+### Added
+
+- the gate holds every Obsidian CLI command and parameter the docs spell — `obsidian-cli NAME …` in a span or a fenced line, and a span opening with a real command — to what the CLI's own `help` declares, through the [ci](https://github.com/rokokol/ci-skill) skill's `check-interface.sh`, vendored. `obsi.sh` passes unknown words through, so `check-sh.sh` could never tell a real command from a ghost. The CLI is not on a runner, so the gate reads `tests/obsidian-help.txt`, the help 1.13.7 answered, and holds it to the live help when `OBSIDIAN_CLI` names the client. The two typos the docs show on purpose, `fil=` and `format=` on `aliases`, carry `check-interface: allow`
+
+### Changed
+
+- `references/obsi.md` no longer counts the related-notes signals beside the table that lists them
+- `obsi.sh` dispatches on `cmd="$1"` in the family's canonical shape, says its exit codes in its header — 0, 1 when the CLI or the vault answered with an error, 2 on a usage error — and is held to that header by the [bash-best-practices](https://github.com/rokokol/bash-best-practices-skill) skill's `check-sh.sh`, vendored: its subcommands, flags and codes in the help, and every `obsi.sh …` in `SKILL.md` and `README.md` a real one, where a passed-through CLI command counts as real because the `*)` arm forwards rather than refuses. The readme names `obsi.sh find`, `obsi.sh graph` and `obsi.sh selftest`, which it never had
+- the rule behind closing stdin on every call inside a loop is that skill's now; `references/pitfalls.md` keeps the measurement and points there
+
+## 2026-09-10
+
+### Added
+
+- `graph related NOTE`, for what a note is connected to without a link to show for it. Direct neighbours are left out because `links` and `backlinks` answer those: what is left is co-citation (something links to both), shared outgoing links, and a tag in common. The tag signal is the one that needed a condition — without it a note came back with 873 related notes, every one of them by tag, because a tag on 649 of 1300 notes is a category rather than a connection. `--tag-max-notes N` is how many notes a tag may be on and still count as a signal — not a number of tags — defaulting to a twentieth of the vault: 0, the default and 100000 gave 18, 51 and 873 results on the same note. It is a flag rather than a constant in the code because the threshold is a cliff and not a curve, and a number that arbitrary should not be a secret. Unlinked mentions are deliberately not a signal here: `metadataCache` does not hold them, and the substitute is one search per name, which is approximate and belongs to a tool that reads the vault's text
+- `find --value`, narrowing to property values the way `--name` and the rest narrow to their fields, and combining with them the same way. Beside `--prop NAME[=VALUE]` it looks at that property's values alone — `find draft --value --prop status` asks for draft in `status`, not in every property of the notes that have one — and without `--value` the filter narrows the notes and nothing else
+- the JavaScript half of the wrapper under test. `check-obsi.sh` takes the code `find` and `graph related` hand to `eval` exactly as the wrapper builds it — through the stub client, never a copy, so it cannot drift from the script — and node runs it against a made-up vault in `tests/fake-app.js`: `--value` alone and scoped by `--prop`, a comma string alias staying one item, a list alias holding a comma staying whole, `tags: a, b` giving no tags, a mixed-case `Tags` or `Aliases` key, and a frontmatter `#x` meeting an inline `x`. A defect is planted for each. node comes from the flake's dev shell, taken from the nixpkgs the lock already pins
+- `selftest`, which checks the wrapper's copy of Obsidian's tag reading against the running app. The copy is forced — the module exporting Obsidian's parsers cannot be required from `eval` — and a copy drifts on an update; `metadataCache.getTags()` is the one answer from Obsidian's own reading that `eval` can reach. `selftest` sums the vault's tags the way `find` and `graph related` read them, under `getTags`' own counting rules copied from 1.13.4 — excluded files skipped, every occurrence counted, a nested tag counted toward each parent, a tag Obsidian refuses counted for nothing, one tag in two cases counted once — and names every tag whose count differs, exiting 1. Measured first on two vaults: 2 of 2 and 400 of 401 tags agree even without the refusal rule, the one left being a template placeholder, `#y{{date:YYYY}}`, which Obsidian's own tag check refuses
+- `references/plugin-dev.md`, the loop for developing a plugin or theme through the CLI — `plugin:reload`, `dev:errors`, `dev:console`, `dev:dom`, `dev:css`, `dev:screenshot` — measured rather than copied: `dev:console` answers nothing until `dev:debug on`, a relative screenshot path writes into the vault, and `dev:mobile` reloads the window
+- `graph unresolved`, which is not a replacement for the first-party command — it lists the same broken links, one row per target and source. The one thing `unresolved verbose` cannot do is say which file each came from, having joined every source into a single field with `, ` where vault paths contain commas
+
+- `check-obsi.sh` and `tests/stub-cli.sh`: the wrapper driven against a fake client, so its shell half is checked on a runner with no Obsidian. The stub reproduces the two dishonest habits the wrapper exists to absorb — an error on stdout at exit 0, and a process that reads stdin — and records every argv, so a test asserts what was *sent* rather than only what came back. Checks for what the shell owns, and on every run a defect planted for each bug actually hit while writing the wrapper — fewer plants than checks, so not every check has been proven able to fail. Two things it cannot answer, said in the file itself: the graph and find queries are JavaScript executed inside the app and no stub can run them, and the same hand wrote the wrapper and its tests, which makes the falsification pass the only real constraint here
+- a distinction the wrapper was not making, found by writing that suite: with the client installed and the app down it said "no Obsidian CLI answered a version. Install one" — sending someone to install what they already have. It now names the two cases apart
+- the count of what `find` dropped, printed rather than left implied. A marker that scores every hit the same makes the ranking meaningless below the cut — 649 notes carry one tag on the vault measured, all at 4 points, ordered alphabetically among themselves — so twenty rows read as "the notes with that tag" and are wrong. Getting that line to print took a second pass: `head` stops reading, the builtin feeding it takes SIGPIPE, and under `pipefail` the wrapper was dying at 141 on that very line, after the rows had already been printed. It is a shell trap and not a CLI one — `obsidian-cli files | head -n 3` leaves `PIPESTATUS` at 0 even at 572 KB, the client being Node — so it is documented where the code is, not in the pitfalls
+- `find` in the wrapper, which annotates `search` rather than replacing it. The first version of this entry claimed `search` cannot reach a note's names; it can — planted with unique nonsense words, `search` matched a filename, an alias, a property value, a heading and a tag alike, because the frontmatter is part of the file's text. What it cannot do is say *which* of those matched, or be restricted to one: `search query=unicast` returns six bare paths where two notes answer to that name and four merely contain the word, and no parameter separates them. `find` runs `search` for the body, reads names, aliases, tags, properties and headings from the index, and merges the two into a ranked list carrying the reason for every hit; `--alias` returns those two alone, which the command set cannot express — its nearest thing, `file file=<name>`, resolves by filename and fails on an alias. `--name`, `--alias`, `--tag`, `--heading` and `--body` narrow it, `--prop NAME[=VALUE]` filters by frontmatter — on both halves, since `search` knows nothing about the filter and would otherwise leak unfiltered rows past it
+- `obsi.sh`, a thin wrapper that adds no commands of its own beyond the link graph and passes everything else to the CLI unchanged. It exists for four things the CLI leaves to every caller and each of which fails quietly: an application error that exits 0, a call that eats the loop's stdin, a client that may be installed under the GUI launcher's name, and a graph too large to print. `graph` summarises the vault, `graph hubs|ends|components|path` answer one question each — `components` lists every group largest first, including the main one, because dropping the biggest and calling the rest islands is a judgement the data does not support: a vault split into halves of 600 would have had one half reported as an island with nothing admitting a choice was made. Both its dimensions are bounded, since a hundred note paths joined onto one line is the runaway output the third rule exists to stop — and `graph dump` is the only query that produces the whole graph — to a file, never to the terminal. Its full surface lives in `references/obsi.md`, and `SKILL.md` gives it rows in the task table and a paragraph — no section of its own. A wrapper that argues for itself in the routing layer is taking room from the routing
+- the whole vault's link graph as something reachable at all. `links` and `backlinks` answer for one note and there is no command for the graph itself, so through commands it is one call per note: 1296 calls and 1.5 s against 6 ms for one, and the per-note output carries no source column, so the 7161 lines it returns cannot be attributed afterwards. `app.metadataCache.resolvedLinks` is the same structure the graph view draws, and the wrapper walks it inside the app so that only the answer crosses back
+- **the CLI reads stdin**, which makes `while IFS= read -r f; do <cli> … ; done < list` run exactly once and end without a word. The run finishes 500 times too fast and prints a plausible result for the first file, so nothing about it looks wrong. It is now the fourth rule in `SKILL.md`, and the wrapper closes stdin on every call it makes
+
+- what `format=` is worth to a script, measured. It is not a global flag: thirteen of the 92 commands available here advertise one, and a command that does not advertise it drops it in silence like any unknown parameter, so `aliases verbose format=json` prints the same bytes as `aliases verbose` and the alias map has no machine-readable form at all. Where JSON is produced it reads as the tab-separated rows wrapped rather than the data serialised, which is why every value arrives as a string — `properties counts format=json` is the single exception measured, returning `"count": 777` as a real number, and it is also the only command whose format list reads `yaml|json|tsv`. The set of commands is derived from `help` by a one-liner rather than transcribed, for the same reason the command list is not
+
+### Changed
+
+- two more measured traps: an alias written as a bare number is no alias, since Obsidian keeps only the string items of `aliases` and its own `aliases` command lists none, and `eval` prints what the code logs on lines above `=> ` rather than into the result. The alias-map example now counts string items only, as Obsidian does
+- the entry on collapsed alias records now says why no output format is a way out. The join happens before any formatter runs, so JSON keeps the joined string in `sources` and CSV quotes it correctly as a single value: both well-formed, both ambiguous, because one file whose name contains a comma is indistinguishable from two files. `count` does not disambiguate either — it counts occurrences of the link rather than source files, and reports 2 against a single source where a template placeholder is linked twice
+- the instruction to keep `eval` code on one line, which was wrong. A multi-line function body passed as a single shell argument runs fine, and a returned string containing newlines prints as several lines with `=> ` on the first only — the constraint was always the shell's quoting, never the CLI's. The entry now carries the way to embed a path without quoting it at all: base64 the value and decode it inside the code, which survives quotes, commas and non-ASCII alike
+- the closing line on a vault's own skills no longer assumes one agent. The directory is whichever one the agent reads under the vault, with `<vault>/.claude/skills/` given as the example rather than the rule, and note conventions are stated as something that may not exist at all rather than something to go and find
+- the description carries English triggers beside the Russian ones — the link graph, related notes, tasks in notes among them — so the skill loads on a request typed in English too; `SKILL.md`'s reference list names `references/obsi.md`, its paragraph on the wrapper points there instead of retelling `find`, and "presets" gave way to "the files it points to"
+
+### Fixed
+
+- a code injection into the running app. `graph hubs`, `ends` and `components` spliced their row count into the JavaScript handed to `eval` without checking it, so `graph hubs app` answered "No links found." at exit 0 — `app` being a name in that scope, coerced to zero rows — and a crafted value ran as code with the app's full access to the vault. Every count now passes one validator before any JavaScript is built, and the suite plants the unchecked form to prove it would notice. Found by an independent review rather than by the suite, which had no check for it
+- `graph hubs` cutting its list without saying so, the only listing here that did
+- a vault named after the command word — `--vault NAME` or `vault=NAME` — handed to the CLI, which drops it in silence and answers for whichever vault is open. It is now refused, with the position it belongs in
+- a missing value for `--vault` and the other flags printing bash's own `line 529: 2: …` instead of the tool's `obsi: …`
+- counts written into prose that restate the length of a list beside them — "the four rules", "three reference files", "Eighteen checks" — each of which was either already wrong or one edit from it. The list is the count
+- frontmatter `tags` and `aliases` are read the way Obsidian 1.13.4 reads them, copied from its bundle because `eval` cannot require the module that exports the parsers: a string is one item and is never split on commas — `aliases: x, y` is one alias — a list is taken item by item, so "Smith, John" stays whole, items that are not strings are dropped, a tag holding a space is no tag at all, and the key matches in any case. `find --tag` had matched a string such as `tags: a, b`, which Obsidian does not treat as tags at all, and `graph related` took a frontmatter `#x` and an inline `x` for two different tags
+- **`graph dump` emptied its file before asking the app.** A query that failed — an app that was down — left an existing `graph.json` empty. The target is checked for writability up front, and the dump is written beside it and moved over it, so the file holds the old graph or the whole new one
+- **inside a nix dev shell a large answer broke the next command.** The shell exports `$out`, bash keeps that export on a local of the same name, and an answer held in one went into the environment of every command run after it — past 128 KB exec refused with "Argument list too long", so `find` reported "No matches found." and `graph dump` of a large vault failed at its first `wc`. The wrapper drops the caller's export of its own names
+- the client's stderr was captured together with its answer, so a runtime warning would have landed inside what the wrapper parses — a dumped graph included. It is passed on to stderr now
+- `graph ends` on a vault where no note qualified printed a blank line at exit 0. It says so in a sentence, and every graph query now refuses an empty reply from the app rather than printing it as an answer
+- `--tag-max-notes` took `010`, which the app's sloppy-mode JavaScript reads as octal 8, and `-1`, the wrapper's own sentinel for the default. It takes zero or a positive number without a leading zero
+- the plant for the `Error: ` check neutered it in `cli()` and `js()` at once, so neither was ever shown to work alone; each has its own plant now, beside new ones for every fix above
+- the gate's guard on the central rule passed on any mention of `help` in `SKILL.md`; it holds the sentence that states the rule, and a copy that lost it while still mentioning `help` has to fail. The length budget counts words rather than lines, since a paragraph is never wrapped and one line can hold a page
+- discovery probing on after a client had answered that the app is down. It went on to `obsidian`, which on a packaged install is the GUI launcher — the one call the probe order exists to avoid, since it opens a window instead of answering. Introduced by the change that told "not running" apart from "not installed", and found by an independent review; the suite now plants the old order and requires a shadowed launcher never to run
+- `vault=NAME` before a wrapper command. The CLI's own spelling reached `find` and `graph` as a vault selector followed by a command the CLI does not have; it is now taken the same way as `--vault`
+- `find` summing scores inside a field, so four matching headings (4 × 3) outranked an exact filename (10) — the opposite of the order its own documentation promised. Each field now counts once, at its best match
+- `find` labelling what `search` contributed as `body`. `search` matches the file's whole text, frontmatter included, so an alias hit came back as `alias+body` whether or not the body held the word. It is now `text`
+- `find` stating how many matches it dropped as a number when the text search had hit its own cap, which makes it only a floor. It now says "at least"
+
+## 2026-09-09
+
+### Added
+
+- what an unresolved target actually is, as a table of kinds with their shares on the measured vault. Only one kind is a defect: most are notes linked ahead of being written, 11 of 60 were template placeholders, 2 were live aliases, and one was an embed written as an explicit path to a file that had since moved — the file existed the whole time, three folders away. That last kind is indistinguishable from a missing file in the output, so the entry says to check the basename against `files` before concluding anything is lost, and why bare-name links survive a move where explicit paths do not
+- the fact that **unlinked mentions are not reachable at all**: the app's Outgoing links panel lists them beside unresolved links, but `app.metadataCache` holds only `resolvedLinks` and `unresolvedLinks`, so neither a command nor `eval` reaches them. A neighbour mentioned by name without a wikilink is invisible to every command in this skill, which matters to anything using `backlinks` to answer "what is related to this note". The manual substitute is given, along with why it is not equivalent
+- how to find a vault's own skills. The closing line already deferred note conventions to "that vault's own skill" while assuming the session could see it; a vault's skills live in `<vault>/.claude/skills/` and the harness offers them only to sessions started under the vault, so from anywhere else they are absent from the skill list while present on disk. The rule now reads: a skill missing from the list was not offered to this session, never that it does not exist
+
+### Removed
+
+- `check-readme.sh` and the gate's readme checks. The rules they enforced belong to the [create-readme](https://github.com/rokokol/create-readme-skill) skill, which is loaded whenever a readme is written or edited, so the gate was deciding the same question a second time — and deciding it against a house style a contributor has no way to know, which is a red run nobody outside can act on. Prose style is now a reading job again; what the gate holds is the skill's own structure and its version claims
+
+## 2026-09-08
+
+### Added
+
+- the skill itself: how to reach a running Obsidian from a shell, what each command's output actually looks like, and the traps that make a wrong answer look like a right one. Written against Obsidian 1.13.7 (installer 1.13.4) on Linux, with every behavioural claim measured on a live 5500-file vault rather than transcribed from the help text
+- the rule that `obsidian-cli help` is the command reference and this skill is not. The command set is generated by the running app and varies with it — `daily:*`, `web`, `workspaces`, `publish:*` and `sync:*` are absent unless their core plugin or service is enabled, so 92 commands were available locally against the 130+ that circulate in third-party skills. A copied list disagrees with the machine it is read on
+- `references/commands.md`, covering what `help` omits: output streams and formats, what `total` counts per command, which commands act on the GUI's active file, and `eval` as the escape hatch for everything the CLI has no command for
+- `references/pitfalls.md`, one entry per trap with the reproduction that found it — including three that cost a wrong answer before they were understood: application errors exit **0** on **stdout**, an unknown parameter name is dropped in silence so the command answers about whichever file is open in the GUI (`backlinks fil=X total` returned 5 where `file=` returned 12), and indexing is asynchronous even through the CLI (9 of 20 immediate reads answered from the pre-write state, 0 of 20 after 0.3 s)
+- the finding that a link written through an alias counts as broken in both directions, because alias resolution is a UI convenience while the metadata index resolves by filename only. It makes `unresolved` over-report and `backlinks` under-report, and it is why a linter should check an unresolved target against `aliases` before calling it a typo
+- `check-skill.sh`, the gate every skill repository shares, copied verbatim from the [ci](https://github.com/rokokol/ci-skill) skill
+
+### Fixed
+
+- the reading that `property:set` cannot write YAML lists at all, carried over from an earlier session. It writes one correctly when given `type=list`; the corruption happens only without it, where a scalar silently replaces an existing list. The real limit is narrower and was not known before: with `type=list` the comma is the item separator and cannot be escaped, so a list value containing a comma cannot be written by that command at any setting — `eval` with `app.fileManager.processFrontMatter` is the way through

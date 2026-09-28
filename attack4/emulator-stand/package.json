@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Hardware-free attack stand: drive the usb_token PIN entry against the real firmware in the rp2040js RP2040 emulator",
   "scripts": {
-    "bootrom": "./fetch-bootrom.sh",
-    "attack": "node stand.mjs"
+    "bootrom": "./src/fetch-bootrom.sh",
+    "attack": "node src/stand.mjs"
   },
   "dependencies": {
     "rp2040js": "^1.4.0"

@@ -1,0 +1,920 @@
+#!/usr/bin/env bash
+# Runs the real test runners and checks the marker sets against what they print today.
+#
+#   tests/upstream.sh [--write] [ECOSYSTEM...]
+#
+# The gate compares markers with fixtures that were captured once. This compares them with
+# the tools, which is the thing that moves. A marker has three ways to die and they need
+# different questions:
+#
+#   the line was renamed upstream   the marker matches nothing any more, and the check it
+#                                   stands for is gone without a word
+#   a healthy run started saying it the marker reddens honest runs, and gets switched off
+#   a new lie appeared              a situation exits 0 and no marker covers it
+#
+# So each ecosystem below declares the situations it can lie in, as a list written by hand
+# the way tests/defects.sh is, and this runs them. A situation that exits 0 must be caught
+# by a marker, or declared `silent` with the reason — Maven prints nothing at all for a
+# module with no test class, and no marker can reach what the tool does not say.
+#
+# Not part of check.sh, and it must not be: it needs a network and half a gigabyte of
+# toolchains, while the gate promises neither. CI runs it on a schedule, where a red run
+# means the world moved rather than that somebody's commit is wrong.
+#
+# --write rewrites the fixtures under tests/fixtures/ so the drift arrives as a diff to
+# read rather than as a message to interpret.
+#
+# No -e: every finding is counted into problems and printed, and the run exits 1 on the
+# counter at the end rather than at the first non-zero grep
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+upstream.sh — runs the real test runners and checks the marker sets against what they print today
+
+  tests/upstream.sh [--write] [ECOSYSTEM...]
+
+  --write      rewrite the fixtures under tests/fixtures/ so the drift arrives as a diff
+  ECOSYSTEM    limit the run to these ecosystems; with none given, every one of them
+
+This reaches the network: it fetches each runner through nix and installs the node ones
+with npm, so it needs both and takes minutes
+Exit 0 when every marker still matches what the tools print, 1 when one does not, 64 on an
+unknown flag, 70 when the repository root cannot be entered
+EOF
+}
+
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$HERE" || exit 70
+
+write=""
+wanted=()
+for arg in "$@"; do
+  case "$arg" in
+    --write) write=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "upstream: no such flag: $arg" >&2
+      exit 64
+      ;;
+    *) wanted+=("$arg") ;;
+  esac
+done
+
+problems=0
+note() {
+  printf 'upstream: %s\n' "$1" >&2
+  problems=$((problems + 1))
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/upstream.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+wants() { # wants ECOSYSTEM
+  ((${#wanted[@]} > 0)) || return 0
+  local w
+  for w in "${wanted[@]}"; do [[ "$w" == "$1" ]] && return 0; done
+  return 1
+}
+
+# The markers of one set, comments and blank lines dropped, as t.sh reads them. An
+# ecosystem with no set at all is not an error here — Playwright ships none on purpose — and
+# grep's complaint about the missing file is noise in a script about logs being read
+markers_of() { # markers_of NAME
+  [[ -f "markers/$1.txt" ]] || return 0
+  grep -v '^[[:space:]]*#' "markers/$1.txt" | grep -v '^[[:space:]]*$' || :
+}
+
+# One situation: its output, its status, and what the table claims about it. LIES means the
+# exits 0 while the run answered about less than it appears to; HONEST means the status
+# already says so and a marker would be a second opinion; SILENT means it lies and prints
+# nothing a marker could match, which is a finding rather than a gap.
+declare_situation() { # declare_situation KIND NAME STATUS OUTFILE [REASON]
+  local kind="$1" name="$2" status="$3" out="$4" reason="${5:-}"
+
+  # Every situation records which markers matched it, whatever its kind. A marker exists to
+  # be found in a log, and plenty of them name something the tool is honest about — a panic,
+  # a build failure, a collection error — because the status can still be swallowed by a
+  # pipe, a wrapper or a `|| true`. Recording matches only for the situations that exit 0
+  # would report those markers as dead, which is the opposite of true.
+  local m hit=""
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    grep -qiF -- "$m" "$out" && {
+      hit="$m"
+      printf '%s\n' "$m" >>"$work/$eco.seen"
+    }
+  done < <(markers_of "$eco")
+
+  case "$kind" in
+    lies)
+      ((status == 0)) ||
+        note "$eco/$name is declared a lie but exited $status — the status already says so, so it is honest now$(why "$out")"
+      [[ -n "$hit" ]] ||
+        note "$eco/$name exits 0 and no marker in markers/$eco.txt matches its output — either the line was renamed upstream or this is a lie nobody covers yet"
+      ;;
+    honest)
+      ((status != 0)) ||
+        note "$eco/$name was declared honest and exited 0 — the tool stopped refusing, and it needs a marker now$(why "$out")"
+      ;;
+    silent)
+      ((status == 0)) ||
+        note "$eco/$name is declared a silent lie but exited $status — the status says so now, so the note is stale: $reason$(why "$out")"
+      [[ -z "$hit" ]] ||
+        note "$eco/$name is declared unmatchable, and the marker '$hit' matches it — the tool started saying something, so drop the declaration"
+      ;;
+  esac
+}
+
+# The healthy run, held to exactly what the gate holds the stored fixture to: every default
+# marker must stay quiet on it, and so must this ecosystem's own set. Not the other sets —
+# they are opted into with -m, and `skipped` from the pytest set matching a .NET run's
+# `Skipped: 0` is not a fault of either. Checking all of them was this script's first
+# finding, about itself.
+check_healthy() { # check_healthy OUTFILE STATUS
+  local out="$1" status="$2" m set
+  ((status == 0)) || note "$eco: the healthy run exited $status — the fixture project no longer passes$(why "$out")"
+  for set in markers/default.txt "markers/$eco.txt"; do
+    [[ -f "$set" ]] || continue
+    while IFS= read -r m; do
+      [[ -n "$m" ]] || continue
+      ! grep -qiF -- "$m" "$out" ||
+        note "$eco: '$m' from $set matches the healthy run — a marker that reddens an honest run gets the whole check switched off"
+    done < <(grep -v '^[[:space:]]*#' "$set" | grep -v '^[[:space:]]*$' || :)
+  done
+}
+
+run() { # run OUTFILE CMD... -> writes the output, returns the command's status
+  local out="$1"
+  shift
+  "$@" >"$out" 2>&1
+}
+
+# `nix shell` writes its download progress to the stream being captured, and on a machine
+# that already has the toolchain it writes nothing at all — so this passed here and failed
+# on the first runner it met, with "copying path ..." counted as the tool's own output. The
+# fetch happens once, before anything is measured, and its noise goes to the terminal.
+warm() { # warm NIX-ARGS...
+  printf '   fetching %s\n' "$*"
+  nix shell "$@" -c true ||
+    note "$eco: could not fetch $* — nothing measured below this line means anything"
+}
+
+# A run that failed where it was not supposed to has to say why. Capturing output and then
+# reporting only a status is the muted-stderr mistake this repository has a rule about: the
+# first CI failure of this script could not be diagnosed from its own log.
+why() { # why OUTFILE -> the tail of a captured run, for a message
+  printf '\n--- %s, last 20 lines ---\n%s' "$1" "$(tail -20 "$1")"
+}
+
+# Called once an ecosystem's situations have all run. A marker that matched none of them is
+# the quiet death this script exists for: the line was renamed upstream, the check it stood
+# for is gone, and every run stays green because the neighbouring markers still match.
+every_marker_still_matches() {
+  local m
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    grep -qxF -- "$m" "$work/$eco.seen" 2>/dev/null ||
+      note "$eco: the marker '$m' matched none of the situations below it — it has stopped catching anything, and nothing else will say so"
+  done < <(markers_of "$eco")
+}
+
+# ---------------------------------------------------------------- php
+
+if wants php; then
+  eco=php
+  echo "== php: PHPUnit"
+  d="$work/php"
+  mkdir -p "$d/tests" "$d/src" "$d/empty" "$d/skipped" "$d/nomethods"
+  cat >"$d/src/Clamp.php" <<'PHP'
+<?php
+function clampToZero(int $n): int { return $n < 0 ? 0 : $n; }
+PHP
+  cat >"$d/tests/ClampTest.php" <<'PHP'
+<?php
+use PHPUnit\Framework\TestCase;
+require_once __DIR__ . '/../src/Clamp.php';
+
+final class ClampTest extends TestCase
+{
+    public function testNegativeBecomesZero(): void { $this->assertSame(0, clampToZero(-5)); }
+    public function testPositiveIsKept(): void { $this->assertSame(7, clampToZero(7)); }
+}
+PHP
+  cat >"$d/skipped/AllSkippedTest.php" <<'PHP'
+<?php
+use PHPUnit\Framework\TestCase;
+final class AllSkippedTest extends TestCase
+{
+    public function testOne(): void { $this->markTestSkipped('needs a database'); }
+    public function testTwo(): void { $this->markTestSkipped('needs a network'); }
+}
+PHP
+  cat >"$d/nomethods/NoMethodsTest.php" <<'PHP'
+<?php
+use PHPUnit\Framework\TestCase;
+final class NoMethodsTest extends TestCase { public function helper(): void {} }
+PHP
+  warm nixpkgs#phpunit
+  pu() { (cd "$d" && nix shell nixpkgs#phpunit -c phpunit --cache-directory .cache "$@"); }
+
+  run "$work/php.healthy" pu tests
+  check_healthy "$work/php.healthy" "$?"
+
+  run "$work/php.empty" pu empty
+  declare_situation lies "a directory holding no test file" "$?" "$work/php.empty"
+  run "$work/php.skipped" pu skipped
+  declare_situation lies "every test skipped" "$?" "$work/php.skipped"
+  run "$work/php.nomethods" pu nomethods
+  declare_situation honest "a class with no test method" "$?" "$work/php.nomethods"
+  run "$work/php.filter" pu --filter nosuchtest tests
+  declare_situation honest "a filter matching nothing" "$?" "$work/php.filter"
+  run "$work/php.bootstrap" pu --bootstrap no-such-file.php tests
+  declare_situation honest "a bootstrap that does not exist" "$?" "$work/php.bootstrap"
+  every_marker_still_matches
+
+  if [[ -n "$write" ]]; then
+    {
+      # shellcheck disable=SC2016  # markdown backticks in a fixture header, not a substitution
+      printf 'A healthy `phpunit tests` on a suite where every test runs and asserts, captured from a real run. No entry in markers/php.txt may match anything here.\n\n'
+      cat "$work/php.healthy"
+    } >tests/fixtures/clean/php.log
+    {
+      printf 'A log carrying one realistic line per entry in markers/php.txt, captured from real runs that exited 0.\n\n'
+      cat "$work/php.empty" "$work/php.skipped"
+    } >tests/fixtures/lying/php.log
+  fi
+fi
+
+# ---------------------------------------------------------------- dotnet
+
+if wants dotnet; then
+  eco=dotnet
+  echo "== dotnet: dotnet test, VSTest"
+  d="$work/dn"
+  mkdir -p "$d/home"
+  export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+  warm nixpkgs#dotnet-sdk
+  dn() { (cd "$d" && HOME="$d/home" nix shell nixpkgs#dotnet-sdk -c dotnet "$@"); }
+  dn new xunit -o Demo >/dev/null 2>&1 ||
+    note "dotnet: could not create the fixture project — the rest of this section says nothing"
+  if [[ -d "$d/Demo" ]]; then
+    cp -r "$d/Demo" "$d/NoTests"
+    sed -i 's/\[Fact\]//' "$d/NoTests"/*.cs 2>/dev/null || :
+
+    run "$work/dn.healthy" dn test Demo
+    check_healthy "$work/dn.healthy" "$?"
+
+    run "$work/dn.filter" dn test Demo --filter 'FullyQualifiedName~NoSuchTest'
+    declare_situation lies "a --filter matching nothing" "$?" "$work/dn.filter"
+    run "$work/dn.notests" dn test NoTests
+    declare_situation lies "an assembly the adapter sees no test in" "$?" "$work/dn.notests"
+    every_marker_still_matches
+
+    if [[ -n "$write" ]]; then
+      {
+        # shellcheck disable=SC2016  # markdown backticks in a fixture header, not a substitution
+        printf 'A healthy `dotnet test` on an xunit project where the tests run, captured from a real run. No entry in markers/dotnet.txt may match anything here.\n\n'
+        cat "$work/dn.healthy"
+      } >tests/fixtures/clean/dotnet.log
+      {
+        printf 'A log carrying one realistic line per entry in markers/dotnet.txt, captured from real runs that exited 0.\n\n'
+        cat "$work/dn.filter" "$work/dn.notests"
+      } >tests/fixtures/lying/dotnet.log
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------- jvm
+
+if wants jvm; then
+  eco=jvm
+  echo "== jvm: Maven, surefire"
+  d="$work/jvm"
+  mkdir -p "$d/src/main/java/demo" "$d/src/test/java/demo"
+  cat >"$d/pom.xml" <<'POM'
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId>
+  <artifactId>demo</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.source>21</maven.compiler.source>
+    <maven.compiler.target>21</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.11.3</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
+POM
+  cat >"$d/src/main/java/demo/Clamp.java" <<'JAVA'
+package demo;
+public final class Clamp {
+    public static int toZero(int n) { return n < 0 ? 0 : n; }
+}
+JAVA
+  cat >"$d/src/test/java/demo/ClampTest.java" <<'JAVA'
+package demo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import org.junit.jupiter.api.Test;
+class ClampTest {
+    @Test void negativeBecomesZero() { assertEquals(0, Clamp.toZero(-5)); }
+    @Test void positiveIsKept() { assertEquals(7, Clamp.toZero(7)); }
+}
+JAVA
+  warm nixpkgs#maven nixpkgs#jdk
+  # GitHub exports JAVA_HOME for its runner JDK; the probe must use the JDK it requested.
+  mvn_() { (cd "$d" && env -u JAVA_HOME nix shell nixpkgs#maven nixpkgs#jdk -c mvn -Dmaven.repo.local="$d/.m2" "$@"); }
+
+  run "$work/jvm.healthy" mvn_ test
+  check_healthy "$work/jvm.healthy" "$?"
+
+  run "$work/jvm.skip" mvn_ -DskipTests test
+  declare_situation lies "-DskipTests left in the command" "$?" "$work/jvm.skip"
+
+  # A class that exists and holds nothing runnable
+  mv "$d/src/test/java/demo/ClampTest.java" "$d/ClampTest.java.away"
+  cat >"$d/src/test/java/demo/EmptyTest.java" <<'JAVA'
+package demo;
+class EmptyTest { void helper() {} }
+JAVA
+  run "$work/jvm.zero" mvn_ test
+  declare_situation lies "a test class with nothing runnable in it" "$?" "$work/jvm.zero"
+  rm -f "$d/src/test/java/demo/EmptyTest.java"
+
+  # And the one no marker can reach
+  run "$work/jvm.none" mvn_ test
+  declare_situation silent "a module with no test class at all" "$?" "$work/jvm.none" \
+    "surefire prints its plugin header and BUILD SUCCESS and nothing else, so failIfNoTests is the only guard"
+  mv "$d/ClampTest.java.away" "$d/src/test/java/demo/ClampTest.java"
+
+  run "$work/jvm.filter" mvn_ -Dtest=NoSuchTest test
+  declare_situation honest "-Dtest matching nothing" "$?" "$work/jvm.filter"
+  every_marker_still_matches
+
+  if [[ -n "$write" ]]; then
+    {
+      # shellcheck disable=SC2016  # markdown backticks in a fixture header, not a substitution
+      printf 'A healthy `mvn test` on a module whose test class runs, captured from a real run. No entry in markers/jvm.txt may match anything here.\n\n'
+      sed -n '/T E S T S/,/BUILD SUCCESS/p' "$work/jvm.healthy"
+    } >tests/fixtures/clean/jvm.log
+    {
+      printf 'A log carrying one realistic line per entry in markers/jvm.txt, captured from real runs that printed BUILD SUCCESS and exited 0.\n\n'
+      grep -E 'Tests run: 0|Tests are skipped|BUILD SUCCESS|surefire' "$work/jvm.zero" "$work/jvm.skip" | sed 's/^[^:]*://'
+    } >tests/fixtures/lying/jvm.log
+  fi
+fi
+
+# ---------------------------------------------------------------- node
+
+if wants node; then
+  eco=node
+  echo "== node: jest and vitest"
+  warm nixpkgs#nodejs
+  d="$work/nd"
+  mkdir -p "$d"
+  printf '{"name":"demo","version":"1.0.0","private":true}\n' >"$d/package.json"
+  # From the registry, because nixpkgs packages neither runner. That is the right way round
+  # for a drift watcher: the question is what today's jest and vitest print
+  printf '   installing jest and vitest from the registry\n'
+  (cd "$d" && HOME="$d" nix shell nixpkgs#nodejs -c npm install --no-audit --no-fund --silent jest vitest) >"$work/nd.install" 2>&1 ||
+    note "node: npm could not install the runners$(why "$work/nd.install")"
+
+  if [[ -x "$d/node_modules/.bin/jest" && -x "$d/node_modules/.bin/vitest" ]]; then
+    mkdir -p "$d/good" "$d/empty" "$d/broken" "$d/snap" "$d/snap2" "$d/handle" "$d/workers"
+    cat >"$d/good/a.test.js" <<'JS'
+import { expect, test } from "vitest";
+
+test("a negative reading becomes zero", () => {
+  expect(Math.max(0, -5)).toBe(0);
+});
+JS
+    jest_() { (cd "$d" && HOME="$d" nix shell nixpkgs#nodejs -c ./node_modules/.bin/jest "$@"); }
+    vitest_() { (cd "$d" && HOME="$d" nix shell nixpkgs#nodejs -c ./node_modules/.bin/vitest "$@"); }
+
+    run "$work/nd.healthy" vitest_ run good
+    check_healthy "$work/nd.healthy" "$?"
+
+    # A second healthy run, with a snapshot that matches. The marker for an unchecked
+    # snapshot is `obsolete,` from the totals line, and its safety rests on jest omitting a
+    # category whose count is zero — `Snapshots: 1 passed, 1 total`, never `0 obsolete`.
+    # jest promises that nowhere, so the day it changes this run reddens and says so, which
+    # is the difference between this marker and the one in markers/rust.txt that spent a
+    # long time reddening every healthy cargo test with nothing watching it.
+    mkdir -p "$d/snapok"
+    printf 'test("a snapshot that matches", () => { expect({a:1}).toMatchSnapshot(); });\n' >"$d/snapok/s.test.js"
+    # Ask for the behavior under test directly: Jest recognizes provider-specific variables
+    # such as GITHUB_ACTIONS as CI even when CI itself is unset.
+    run "$work/nd.snapwrite" jest_ --updateSnapshot snapok
+    run "$work/nd.healthy2" jest_ snapok
+    check_healthy "$work/nd.healthy2" "$?"
+
+    run "$work/nd.empty" vitest_ run empty
+    declare_situation honest "vitest pointed at a directory with no test file" "$?" "$work/nd.empty"
+
+    # The flag is not printed by either runner; a CI log carries it because the runner
+    # echoes the command, which is what `sh -x` does. Same shape as pytest's --exitfirst
+    run "$work/nd.passwith" sh -x -c "cd '$d' && HOME='$d' nix shell nixpkgs#nodejs -c ./node_modules/.bin/jest empty --passWithNoTests"
+    declare_situation lies "--passWithNoTests turning an empty run green" "$?" "$work/nd.passwith"
+
+    printf 'syntax ( error\n' >"$d/broken/b.test.js"
+    run "$work/nd.broken" jest_ broken
+    declare_situation honest "a jest suite that will not load" "$?" "$work/nd.broken"
+
+    printf 'test("one snapshot", () => { expect({a:1}).toMatchSnapshot(); });\n' >"$d/snap/s.test.js"
+    run "$work/nd.snap" jest_ --updateSnapshot snap
+    declare_situation lies "a snapshot written by the run that was meant to check it" "$?" "$work/nd.snap"
+    printf 'test("other", () => { expect(1).toBe(1); });\n' >"$d/snap/s.test.js"
+    run "$work/nd.obsolete" jest_ snap
+    # jest fails a run holding an obsolete snapshot, so the status says it and the marker is
+    # for the log of a run whose status something else swallowed
+    declare_situation honest "a snapshot nothing compares against any more" "$?" "$work/nd.obsolete"
+
+    printf 'test("a", () => { expect({a:1}).toMatchSnapshot(); });\ntest("b", () => { expect({b:2}).toMatchSnapshot(); });\n' >"$d/snap2/s.test.js"
+    run "$work/nd.snaps" jest_ --updateSnapshot snap2
+    declare_situation lies "two snapshots written, for the plural the set also carries" "$?" "$work/nd.snaps"
+
+    for i in 1 2 3; do
+      printf 'const net = require("net");\ntest("leaks in worker %s", () => { const s = net.createServer(); s.listen(0); expect(1).toBe(1); });\n' "$i" >"$d/workers/w$i.test.js"
+    done
+    run "$work/nd.workers" jest_ workers --maxWorkers=3 --forceExit
+    declare_situation lies "workers force-exited because the tests leaked handles" "$?" "$work/nd.workers"
+
+    # This one does not end: jest waits on the handle for as long as the runner allows, and
+    # in CI that is the job timeout. The nonzero status below is the watchdog's, not jest's,
+    # which is the finding rather than a flaw in the probe
+    printf 'const net = require("net");\ntest("leaves a socket listening", () => { const s = net.createServer(); s.listen(0); expect(1).toBe(1); });\n' >"$d/handle/h.test.js"
+    run "$work/nd.hang" timeout 60 sh -c "cd '$d' && HOME='$d' nix shell nixpkgs#nodejs -c ./node_modules/.bin/jest handle"
+    declare_situation honest "a run that never ends because a handle was left open" "$?" "$work/nd.hang"
+    every_marker_still_matches
+
+    if [[ -n "$write" ]]; then
+      # shellcheck disable=SC2016  # markdown backticks in a fixture header, not a substitution
+      printf 'A healthy `vitest run` with one test file, captured from a real run. No entry in markers/node.txt may match anything here.\n\n' >tests/fixtures/clean/node.log
+      cat "$work/nd.healthy" >>tests/fixtures/clean/node.log
+      {
+        printf 'A log carrying one realistic line per entry in markers/node.txt, captured from real jest and vitest runs.\n\n'
+        cat "$work/nd.empty" "$work/nd.passwith" "$work/nd.broken" "$work/nd.snap" "$work/nd.obsolete" "$work/nd.snaps" "$work/nd.workers" "$work/nd.hang"
+      } >tests/fixtures/lying/node.log
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------- cpp
+
+if wants cpp; then
+  eco=cpp
+  echo "== cpp: cmake, ctest, gtest, the sanitizers"
+  warm nixpkgs#cmake nixpkgs#gnumake nixpkgs#ninja nixpkgs#gcc nixpkgs#clang nixpkgs#gtest
+  d="$work/cpp"
+  mkdir -p "$d/src"
+  cat >"$d/CMakeLists.txt" <<'CM'
+cmake_minimum_required(VERSION 3.20)
+project(demo CXX)
+enable_testing()
+add_executable(clamp_test src/clamp_test.cpp)
+add_test(NAME clamp COMMAND clamp_test)
+CM
+  cat >"$d/src/clamp_test.cpp" <<'CPP'
+#include <cstdio>
+
+int to_zero(int n) { return n < 0 ? 0 : n; }
+
+int main() {
+  if (to_zero(-5) != 0) {
+    std::printf("a negative reading was let through\n");
+    return 1;
+  }
+  std::printf("1 passed\n");
+  return 0;
+}
+CPP
+  cm() { (cd "$d" && nix shell nixpkgs#cmake nixpkgs#gnumake nixpkgs#gcc -c "$@"); }
+
+  run "$work/cpp.configure" cm cmake -S . -B build
+  run "$work/cpp.build" cm cmake --build build
+  run "$work/cpp.healthy" cm ctest --test-dir build --output-on-failure
+  check_healthy "$work/cpp.healthy" "$?"
+
+  # ctest with the binary taken away: it says so, and its status says so too
+  mv "$d/build/clamp_test" "$d/clamp_test.away"
+  run "$work/cpp.missing" cm ctest --test-dir build --output-on-failure
+  declare_situation honest "a test binary that is not where ctest expects it" "$?" "$work/cpp.missing"
+  mv "$d/clamp_test.away" "$d/build/clamp_test"
+
+  # A gtest binary whose filter matches nothing: [  PASSED  ] 0 tests, and exit 0
+  cat >"$d/src/gtest_demo.cpp" <<'CPP'
+#include <gtest/gtest.h>
+
+TEST(Clamp, NegativeBecomesZero) { EXPECT_EQ(0, 0); }
+CPP
+  # `nix shell` puts gtest on PATH and nowhere a bare compiler looks, so its own store
+  # path is asked for and passed as -I and -L
+  gt=$(nix eval --raw nixpkgs#gtest.outPath 2>/dev/null || echo "")
+  gtd=$(nix eval --raw nixpkgs#gtest.dev.outPath 2>/dev/null || echo "$gt")
+  run "$work/cpp.gtestbuild" sh -c "cd '$d' && nix shell nixpkgs#gcc -c g++ -std=c++17 -I'$gtd/include' src/gtest_demo.cpp -L'$gt/lib' -lgtest -lgtest_main -pthread -Wl,-rpath,'$gt/lib' -o gtest_demo"
+  if [[ -x "$d/gtest_demo" ]]; then
+    run "$work/cpp.nofilter" sh -c "cd '$d' && ./gtest_demo --gtest_filter=NoSuchTest"
+    declare_situation lies "a gtest filter matching nothing" "$?" "$work/cpp.nofilter"
+  else
+    note "cpp: the gtest fixture would not build, so its marker was not exercised$(why "$work/cpp.gtestbuild")"
+  fi
+
+  # Undefined behaviour under the sanitizer: it reports and the program still exits 0,
+  # which is the default and the whole reason these two lines are markers
+  cat >"$d/src/ub.cpp" <<'CPP'
+#include <cstdio>
+#include <climits>
+
+int main() {
+  int n = INT_MAX;
+  volatile int one = 1;
+  std::printf("%d\n", n + one);
+  return 0;
+}
+CPP
+  # clang, because the two markers need both lines and gcc's libubsan prints only the
+  # first: `SUMMARY: UndefinedBehaviorSanitizer` arrives by default under clang and under
+  # gcc only with UBSAN_OPTIONS=print_summary=1. Either way the program exits 0, which is
+  # what makes these markers worth having
+  run "$work/cpp.ubbuild" sh -c "cd '$d' && nix shell nixpkgs#clang -c clang++ -std=c++17 -fsanitize=undefined src/ub.cpp -o ub"
+  if [[ -x "$d/ub" ]]; then
+    run "$work/cpp.ub" sh -c "cd '$d' && ./ub"
+    declare_situation lies "undefined behaviour the sanitizer reports without failing" "$?" "$work/cpp.ub"
+  else
+    note "cpp: the sanitizer fixture would not build, so its markers were not exercised$(why "$work/cpp.ubbuild")"
+  fi
+
+  # make and ninja refusing to build, which means the tests ran against whatever was there
+  printf 'all:\n\t@echo built\n' >"$d/Makefile"
+  run "$work/cpp.make" sh -c "cd '$d' && nix shell nixpkgs#gnumake -c make no-such-target"
+  declare_situation honest "make asked for a target that does not exist" "$?" "$work/cpp.make"
+
+  printf 'rule fail\n  command = false\nbuild out: fail\n' >"$d/build.ninja"
+  run "$work/cpp.ninja" sh -c "cd '$d' && nix shell nixpkgs#ninja -c ninja"
+  declare_situation honest "a ninja build that stops" "$?" "$work/cpp.ninja"
+  every_marker_still_matches
+
+  if [[ -n "$write" ]]; then
+    # shellcheck disable=SC2016  # markdown backticks in a fixture header, not a substitution
+    printf 'A healthy `cmake --build` followed by `ctest --test-dir build --output-on-failure` with one registered test, captured from a real run. No entry in markers/cpp.txt may match anything here.\n\n' >tests/fixtures/clean/cpp.log
+    cat "$work/cpp.healthy" >>tests/fixtures/clean/cpp.log
+    {
+      printf 'A log carrying one realistic line per entry in markers/cpp.txt, captured from real runs of ctest, gtest, the undefined-behaviour sanitizer, make and ninja.\n\n'
+      cat "$work/cpp.missing" "$work/cpp.nofilter" "$work/cpp.ub" "$work/cpp.make" "$work/cpp.ninja" 2>/dev/null
+    } >tests/fixtures/lying/cpp.log
+  fi
+fi
+
+# ---------------------------------------------------------------- shell
+
+if wants shell; then
+  eco=shell
+  echo "== shell: bats"
+  warm nixpkgs#bats
+  d="$work/sh"
+  mkdir -p "$d/good" "$d/bad"
+  cat >"$d/good/clamp.bats" <<'BATS'
+@test "a negative reading is clamped to zero" {
+  run sh -c 'n=-5; [ "$n" -lt 0 ] && echo 0 || echo "$n"'
+  [ "$output" = "0" ]
+}
+BATS
+  # Three shapes in one file: an assertion that fails, a variable nothing set under `set -u`,
+  # and a file that is not there. All three reach the log of a run whose status a wrapper
+  # can still swallow, which is what the markers are for
+  cat >"$d/bad/shapes.bats" <<'BATS'
+@test "an assertion that does not hold" {
+  run sh -c 'echo one'
+  [ "$output" = "two" ]
+}
+
+@test "a variable nothing ever set" {
+  run bash -c 'set -u; echo "$never_set_anywhere"'
+  [ "$status" -eq 0 ]
+}
+
+@test "a helper that is not there" {
+  run bash -c 'set -e; . ./helpers/not-here.bash'
+  [ "$status" -eq 0 ]
+}
+BATS
+  bt() { (cd "$d" && nix shell nixpkgs#bats -c bats --print-output-on-failure "$@"); }
+
+  run "$work/sh.healthy" bt good/
+  check_healthy "$work/sh.healthy" "$?"
+
+  run "$work/sh.bad" bt bad/
+  declare_situation honest "a failing assertion, an unset variable and a missing helper" "$?" "$work/sh.bad"
+  every_marker_still_matches
+
+  if [[ -n "$write" ]]; then
+    # shellcheck disable=SC2016  # markdown backticks in a fixture header, not a substitution
+    printf 'A healthy `bats --print-output-on-failure tests/` with one test, captured from a real run. No entry in markers/shell.txt may match anything here.\n\n' >tests/fixtures/clean/shell.log
+    cat "$work/sh.healthy" >>tests/fixtures/clean/shell.log
+    {
+      printf 'A log carrying one realistic line per entry in markers/shell.txt, captured from a real bats run.\n\n'
+      cat "$work/sh.bad"
+    } >tests/fixtures/lying/shell.log
+  fi
+fi
+
+# ---------------------------------------------------------------- pytest
+
+if wants pytest; then
+  eco=pytest
+  echo "== pytest"
+  warm nixpkgs#python3Packages.pytest
+  d="$work/py"
+  mkdir -p "$d/good" "$d/shapes" "$d/broken" "$d/failing"
+  cat >"$d/good/test_clamp.py" <<'PYT'
+def to_zero(n):
+    return 0 if n < 0 else n
+
+
+def test_negative_becomes_zero():
+    assert to_zero(-5) == 0
+PYT
+  cat >"$d/shapes/test_shapes.py" <<'PYT'
+import threading
+
+import pytest
+
+
+@pytest.mark.xfail(reason="a known upstream bug")
+def test_xfails():
+    assert 1 == 2
+
+
+@pytest.mark.xfail(reason="thought to be broken and is not")
+def test_xpasses():
+    assert 1 == 1
+
+
+@pytest.mark.skip(reason="needs a database")
+def test_skipped():
+    assert 1 == 1
+
+
+class RaisesWhenCollected:
+    def __del__(self):
+        raise ValueError("raised while being finalised")
+
+
+def test_unraisable():
+    RaisesWhenCollected()
+
+
+def test_thread_exception():
+    def boom():
+        raise RuntimeError("raised on a thread the test does not check")
+
+    t = threading.Thread(target=boom)
+    t.start()
+    t.join()
+PYT
+  printf 'def test_x(:\n' >"$d/broken/test_will_not_import.py"
+  cat >"$d/failing/test_fails.py" <<'PYT'
+def test_one():
+    assert 1 == 2
+
+
+def test_two():
+    assert 1 == 1
+PYT
+  pt() { (cd "$d" && nix shell nixpkgs#python3Packages.pytest -c pytest -p no:cacheprovider "$@"); }
+
+  run "$work/py.healthy" pt good
+  check_healthy "$work/py.healthy" "$?"
+
+  # One file for the five shapes that exit 0 while the run answered about less than it looks
+  run "$work/py.shapes" pt shapes
+  declare_situation lies "xfail, xpass, skip, an unraisable and a thread exception" "$?" "$work/py.shapes"
+
+  # A file that will not import. One error is "1 error during collection", two are "2
+  # errors" — which is why the marker is the part they share and not the plural
+  run "$work/py.collect" pt broken
+  declare_situation honest "a test file that will not import" "$?" "$work/py.collect"
+
+  # -x stops at the first failure and the rest never run. pytest does not name the flag in
+  # its output; a CI log carries it because the runner echoes the command, which is what
+  # `sh -x` does here — the marker is about the invocation, not about pytest's report
+  run "$work/py.exitfirst" sh -x -c "cd '$d' && nix shell nixpkgs#python3Packages.pytest -c pytest -p no:cacheprovider --exitfirst failing"
+  declare_situation honest "-x stopping before the rest of the suite ran" "$?" "$work/py.exitfirst"
+  every_marker_still_matches
+
+  if [[ -n "$write" ]]; then
+    # shellcheck disable=SC2016  # markdown backticks in a fixture header, not a substitution
+    printf 'A healthy `pytest` run where the one test runs and passes, captured from a real run. No entry in markers/pytest.txt may match anything here.\n\n' >tests/fixtures/clean/pytest.log
+    cat "$work/py.healthy" >>tests/fixtures/clean/pytest.log
+    {
+      printf 'A log carrying one realistic line per entry in markers/pytest.txt, captured from real pytest runs.\n\n'
+      cat "$work/py.shapes" "$work/py.collect" "$work/py.exitfirst"
+    } >tests/fixtures/lying/pytest.log
+  fi
+fi
+
+# ---------------------------------------------------------------- go
+
+if wants go; then
+  eco=go
+  echo "== go: go test"
+  warm nixpkgs#go
+  d="$work/go"
+  mkdir -p "$d/have" "$d/none" "$d/broken" "$d/mixed"
+  cat >"$d/go.mod" <<'GOMOD'
+module example.com/clean
+
+go 1.22
+GOMOD
+  cat >"$d/have/have.go" <<'GO'
+package have
+
+func ToZero(n int) int {
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+GO
+  cat >"$d/have/have_test.go" <<'GO'
+package have
+
+import "testing"
+
+func TestToZero(t *testing.T) {
+	if ToZero(-5) != 0 {
+		t.Fatal("a negative reading was let through")
+	}
+}
+GO
+  go_() { (cd "$d" && HOME="$d" GOFLAGS=-mod=mod GOCACHE="$d/.cache" nix shell nixpkgs#go -c go "$@"); }
+
+  run "$work/go.healthy" go_ test ./have/ -count=1
+  check_healthy "$work/go.healthy" "$?"
+
+  # A package with no _test.go: `?  pkg [no test files]`, and the run exits 0
+  cat >"$d/none/none.go" <<'GO'
+package none
+
+func Unused() int { return 1 }
+GO
+  run "$work/go.none" go_ test ./... -count=1
+  declare_situation lies "a package holding no test file" "$?" "$work/go.none"
+  rm -f "$d/none/none.go"
+
+  # -run matching nothing: the package is reported ok, with the warning beside it
+  run "$work/go.norun" go_ test ./have/ -count=1 -run NoSuchTest -v
+  declare_situation lies "-run matching no test" "$?" "$work/go.norun"
+
+  # The second run of an unchanged package is not a run at all
+  run "$work/go.warm" go_ test ./have/
+  run "$work/go.cached" go_ test ./have/
+  declare_situation lies "a cached result standing in for a run" "$?" "$work/go.cached"
+
+  # A package that does not compile, and one holding two package names
+  cat >"$d/broken/broken.go" <<'GO'
+package broken
+
+func Broken() int { return "not an int" }
+GO
+  run "$work/go.build" go_ test ./broken/ -count=1
+  declare_situation honest "a package that does not compile" "$?" "$work/go.build"
+  rm -f "$d/broken/broken.go"
+
+  printf 'package one\n' >"$d/mixed/one.go"
+  printf 'package two\n' >"$d/mixed/two.go"
+  run "$work/go.setup" go_ test ./mixed/ -count=1
+  declare_situation honest "a directory holding two package names" "$?" "$work/go.setup"
+  rm -f "$d/mixed/one.go" "$d/mixed/two.go"
+  every_marker_still_matches
+
+  if [[ -n "$write" ]]; then
+    # shellcheck disable=SC2016  # markdown backticks in a fixture header, not a substitution
+    printf 'A healthy `go test ./... -count=1` on a module where every package has a test, captured from a real run. No entry in markers/go.txt may match anything here.\n\n' >tests/fixtures/clean/go.log
+    cat "$work/go.healthy" >>tests/fixtures/clean/go.log
+    {
+      printf 'A log carrying one realistic line per entry in markers/go.txt, captured from real go test runs.\n\n'
+      cat "$work/go.none" "$work/go.norun" "$work/go.cached" "$work/go.build" "$work/go.setup"
+    } >tests/fixtures/lying/go.log
+  fi
+fi
+
+# ---------------------------------------------------------------- rust
+
+if wants rust; then
+  eco=rust
+  echo "== rust: cargo test"
+  warm nixpkgs#cargo nixpkgs#rustc
+  d="$work/rs"
+  mkdir -p "$d/src"
+  cat >"$d/Cargo.toml" <<'TOML'
+[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+TOML
+  cat >"$d/src/lib.rs" <<'RS'
+/// Clamps a reading to zero.
+///
+/// ```
+/// assert_eq!(demo::to_zero(-5), 0);
+/// ```
+pub fn to_zero(n: i32) -> i32 { if n < 0 { 0 } else { n } }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn negative_becomes_zero() { assert_eq!(super::to_zero(-5), 0); }
+}
+RS
+  cg() { (cd "$d" && CARGO_HOME="$d/.cargo" nix shell nixpkgs#cargo nixpkgs#rustc -c cargo "$@"); }
+
+  run "$work/rs.healthy" cg test
+  check_healthy "$work/rs.healthy" "$?"
+
+  # A crate whose targets hold no test: `running 0 tests` under `test result: ok`, exit 0
+  cat >"$d/src/lib.rs" <<'RS'
+pub fn to_zero(n: i32) -> i32 { if n < 0 { 0 } else { n } }
+RS
+  run "$work/rs.none" cg test
+  declare_situation lies "a crate whose targets hold no test" "$?" "$work/rs.none"
+
+  # A test that panics. The status is honest, and the markers are still needed: a panic
+  # reaches the log of a run whose status something else swallowed
+  cat >"$d/src/lib.rs" <<'RS'
+pub fn to_zero(n: i32) -> i32 { if n < 0 { 0 } else { n } }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn negative_becomes_zero() { assert_eq!(super::to_zero(-5), 1); }
+}
+RS
+  run "$work/rs.fail" cg test
+  declare_situation honest "a test that fails" "$?" "$work/rs.fail"
+  every_marker_still_matches
+
+  if [[ -n "$write" ]]; then
+    # shellcheck disable=SC2016  # markdown backticks in a fixture header, not a substitution
+    printf 'A healthy `cargo test` on a crate where every target has a test, unit and doc-test both, captured from a real run. No entry in markers/rust.txt may match anything here: `0 filtered out` is what every full run prints, and a marker on it reddened every healthy run before this fixture existed.\n\n' >tests/fixtures/clean/rust.log
+    cat "$work/rs.healthy" >>tests/fixtures/clean/rust.log
+    {
+      printf 'A log carrying one realistic line per entry in markers/rust.txt, captured from real cargo runs.\n\n'
+      cat "$work/rs.none" "$work/rs.fail"
+    } >tests/fixtures/lying/rust.log
+  fi
+fi
+
+# ---------------------------------------------------------------- playwright
+
+if wants playwright; then
+  eco=playwright
+  echo "== playwright: no marker set, and the run below is why"
+  d="$work/pw"
+  mkdir -p "$d/tests" "$d/empty"
+  cat >"$d/tests/clamp.spec.js" <<'JS'
+const { test, expect } = require('@playwright/test');
+function clampToZero(n) { return n < 0 ? 0 : n; }
+test('a negative reading becomes zero', async () => { expect(clampToZero(-5)).toBe(0); });
+test('a positive reading is kept', async () => { expect(clampToZero(7)).toBe(7); });
+JS
+  warm nixpkgs#playwright-test
+  pw() { (cd "$d" && nix shell nixpkgs#playwright-test -c playwright "$@"); }
+
+  # There is no markers/playwright.txt, so no marker speaks for or against these runs: what
+  # holds the reference's "there is no set, and here is why" to the tool is the status each
+  # shape exits with and the blank output of --pass-with-no-tests, checked below
+  run "$work/pw.pass" pw test --grep NoSuchTitle --pass-with-no-tests --reporter=list
+  st=$?
+  ((st == 0)) || note "playwright: --pass-with-no-tests exited $st — it refuses now, and the reference is stale"
+  # A blank line is what it prints; the claim is that there is no content, not no bytes
+  [[ -z "$(tr -d '[:space:]' <"$work/pw.pass")" ]] ||
+    note "playwright: --pass-with-no-tests printed something — the reference says a blank line and nothing else:"$'\n'"$(cat "$work/pw.pass")"
+
+  run "$work/pw.grep" pw test --grep NoSuchTitle --reporter=list
+  declare_situation honest "a --grep matching nothing" "$?" "$work/pw.grep"
+
+  if [[ -n "$write" ]]; then
+    run "$work/pw.healthy" pw test --reporter=list
+    printf 'Playwright ships no marker set; this is kept only so a healthy run is on record. See references/ecosystems/playwright.md.\n\n' >tests/fixtures/clean/playwright.log
+    cat "$work/pw.healthy" >>tests/fixtures/clean/playwright.log
+  fi
+fi
+
+echo
+if ((problems == 0)); then
+  echo "upstream: every marker still matches a real lie, and none of them matches a healthy run"
+else
+  echo "upstream: $problems finding(s) above — the tools moved, not the repository" >&2
+  exit 1
+fi

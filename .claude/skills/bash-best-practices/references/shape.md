@@ -1,0 +1,161 @@
+# The shape of a script
+
+Every utility in this family is the same script with a different middle: the same header, the same `set` line, the same refusal helpers, the same dispatcher, the same exit codes. Because `check-sh.sh` parses several of these forms literally, the spellings below are the definition rather than a preference. The skeleton that assembles them lives once, in [`templates/script.sh`](../templates/script.sh); nothing here is a second copy of it
+
+## The header and the help
+
+```sh
+#!/usr/bin/env bash
+# Taken from OWNER/REPO through the vendoring cascade: change it there, never here
+# Needs bash 3.2 and POSIX tools only
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+name.sh — one sentence saying what this is and what it is for
+
+  name.sh [-n NAME] [-d DOC]... SCRIPT
+
+  -n NAME   what the docs call the script (default: its basename)
+
+Nothing here reaches the network
+Exit: 0 clean, 1 findings printed, 2 a usage error
+EOF
+}
+```
+
+- **The shebang is `#!/usr/bin/env bash`, never `sh`.** Everything below — `[[`, arrays, `PIPESTATUS`, `local` — is bash, and `sh` is dash on a Debian host, which has none of it. A script whose shebang says bash is judged as bash whatever shell the caller is typing in, which is what makes it safe under the agent's harness ([harness.md](harness.md))
+- **The help is for whoever runs the script, and never opens it.** Everything a caller needs is there, from what the script is for to every fact they act on: "Nothing here reaches the network" is what lets a gate run a check on a pull request, so it is the help's. What it must list, how it is printed and in what grammar is [help.md](help.md)
+- **The header is for whoever changes the file.** It runs from line 2 to the first line that is not a comment and holds only what an editor needs: where the file comes from and how a copy of it changes, the bash it is written for, the invariants the code keeps, and the reason behind a choice that looks wrong. What the script is for is not among them — that is the caller's first question, so it opens the help
+- **The test is what a line changes, and a line both readers need goes to the help.** A line is the caller's when it changes what they type, what they expect or where they run the script, and the editor's when it constrains what may be written. `Needs bash 3.2 and POSIX tools only` constrains the constructs and changes nothing for a caller, whose bash the shebang picks, so it is the header's; a line that serves both goes to the help, which the editor reads in the same file and the caller cannot avoid, and a line that serves neither goes nowhere
+- **The bash floor is matched, not read.** `check-sh.sh` finds the claim as `^# .*Needs bash 3\.2` in the header and, once it is there, polices it by looking for constructs newer than that floor in the script's syntax tree. That is still a proxy — it says a construct is there, not that the script runs — and the proof is a run under the bash the claim names ([portability.md](portability.md))
+- **Usage, flag and exit-code rows in the help are indented two spaces.** The indent is grammar rather than typography: `check-sh.sh` reads flag rows as `^  -` and exit-code rows as `^  [0-9]+  `
+
+## `set -euo pipefail`, flag by flag
+
+- **`-e`** stops at the first failing command — but not inside `if`, `while`, `&&`, `||`, or a function whose own result is tested, which is where most surprises live
+- **`-u`** makes an unset variable an error, so a typo'd name is not silently empty. `${VAR:-}` where empty is legitimate, and `${T-}` rather than `[[ -v T ]]`, which bash gained only in 4.2
+- **`-o pipefail`** makes a pipeline report the last non-zero status. Without it `false | true` succeeds, and so does `pytest | tail`
+- **`${PIPESTATUS[0]}` is read on the line after the pipeline and nowhere later.** Any simple command resets it, an assignment included, so the whole array is copied in one command — `ps=("${PIPESTATUS[@]}")` — and read from the copy. zsh spells it `$pipestatus` and indexes from 1, so a line moved between the two silently yields an empty string ([harness.md](harness.md))
+- **A `for` loop exits with its last iteration's status**, so a loop that fails in the middle and succeeds at the end succeeds: count failures in a variable and exit on the counter
+- **`-e` is dropped only where a non-zero status is the answer, and a comment above the line says which answer** — the reason is invisible in the line, which differs from `set -euo pipefail` by one letter. Two shapes qualify, and nothing else does. **Findings are counted:** a checker that must print every finding before exiting cannot die on the first non-zero `grep`, so it exits on a counter at the end — `# No -e: every finding is printed and counted, and a non-zero grep is data, not a failure`. **Another command's status is the verdict:** a harness that passes `CMD`'s status through, a checker that asserts on the status of what it runs, a stub whose exit code is the scenario it is impersonating — each captures that status with `|| status=$?` and would be killed by `-e` before it could report. Write the file's own case in its own words: a comment giving the wrong one of the two is worse than no comment, because it sends the next reader looking for a counter that is not there. Anywhere else a missing `-e` is a script that carries on after a failure and exits 0
+- **A producer whose consumer stops reading early dies of SIGPIPE, and `pipefail` makes that death the pipeline's status.** `yes | cmd` is the plain case; `grep -q`, which stops at its first match, `awk '…{ exit }'`, `sed q` and `head` do the same to whatever feeds them, so a `grep -q` that finds what it looks for fails the pipeline, and under `set -e` the script ends there with 141 and not a word. Silencing the producer's stderr changes nothing, because the status is the signal and not the complaint. Say the death is expected with `{ yes || true; } | cmd`, let the consumer read on to the end, or feed it from a variable with `<<<`, which leaves no producer to kill:
+
+```console
+$ bash -c 'set -o pipefail; yes 2>/dev/null | head -1 >/dev/null; echo "status=$?"'
+status=141
+$ bash -c 'set -o pipefail; { yes || true; } | head -1 >/dev/null; echo "status=$?"'
+status=0
+$ bash -c 'set -o pipefail; seq 200000 | grep -q 1; echo "status=$?"'
+status=141
+$ bash -c 'set -o pipefail; v=$(seq 200000); grep -q 1 <<<"$v"; echo "status=$?"'
+status=0
+$ bash -c 'set -euo pipefail; seq 200000 | awk "NR == 1 { exit }"; echo survived'; echo "exit=$?"
+exit=141
+$ bash -c 'set -euo pipefail; seq 200000 | awk "NR == 1 { print } { }" >/dev/null; echo survived'
+survived
+$ bash -c 'set -euo pipefail; v=$(seq 200000); awk "NR == 1 { exit }" <<<"$v"; echo survived'
+survived
+```
+
+A short text is no defence, and this is where the rule is usually lost: bash line-buffers stdout, so a few hundred bytes still leave in one `write()` per line, or in two where the C library coalesces, and the last of them is what meets the closed pipe. The pipeline then fails once in tens of thousands of runs instead of every time, which is how it reaches CI rather than the first test, and the spelling decides which way the error falls — `! … | grep -q` reports a finding that is not there, while `… | grep -q || flag=1` leaves a check silently switched off. The writes, the rates and the two directions are measured in [pitfalls.md](pitfalls.md#streams)
+
+## Refusing
+
+```sh
+fail() {
+  printf 'check-sh: %s\n' "$1" >&2
+  exit 1
+}
+die() {
+  printf 'check-sh: %s\n' "$1" >&2
+  exit 2
+}
+```
+
+- **`printf`, not `echo`.** `echo` is the least portable builtin there is: a message beginning with `-n`, or carrying a backslash, is interpreted rather than printed, and bash, zsh and `/bin/echo` disagree about which. Use `printf '%s\n'` everywhere
+- **`die` inside `$(...)` exits the subshell, not the script.** A helper that can refuse assigns to a global and `return`s; it never hands its answer back through command substitution, where refusal can leave an empty result while the caller continues
+
+## Finding itself, and its scratch space
+
+```sh
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/check-sh.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+```
+
+- **The first line is the self-location.** `$0` is wrong under `source`, a bare `dirname` leaves a relative path that any later `cd` invalidates, and `--` survives a script whose path begins with a dash
+- **The `readlink` loop is added only when the script is reached through a symlink** — an installed tool on `PATH` that reads data beside itself would otherwise look beside the link rather than the target. It is a loop over plain `readlink`, never `readlink -f`, which is GNU and reached macOS only in 12.3 ([portability.md](portability.md)). In a script nobody symlinks the loop is dead code the next reader has to disprove
+- **Every temporary lives under one `mktemp -d` with a template that names the owner, cleaned by a single `trap … EXIT`.** A fixed path under `/tmp` collides between two runs and is a symlink attack in a shared directory; `"${TMPDIR:-/tmp}/NAME.XXXXXX"` makes the leftovers of a crashed run greppable. What the template does and does not buy on a BSD `mktemp` is in [portability.md](portability.md)
+- **In a Nix dev shell, `export -n out err` goes right after the `set` line.** The build exports `$out`, and bash keeps that export on a local of the same name: once a local `out` grows past the environment limit, `exec` refuses subsequent commands with "Argument list too long". The script's own names are its own
+
+## Streams, and the absence of decoration
+
+- **Everything a human reads goes to stderr, everything a program parses to stdout.** Then `tool | jq` works while progress and refusals stay visible, and this is also why the help goes to stdout under `--help` and to stderr from a refusal arm
+- **No colour, and therefore no `NO_COLOR`.** These scripts run under CI, under an agent's Bash tool and in pipes far more often than in a terminal, and doing colour honestly means an isatty test, a `NO_COLOR` check and a `--no-color` flag — three code paths carrying no information. Emitting none is one path
+- **No `--json` flag either; a `status` subcommand prints one JSON line instead.** A flag that reshapes every output doubles every output path in the script and every row in the help, where a subcommand whose whole contract is machine-readable has one shape, is named in the dispatcher, and is checked like any other subcommand
+
+## Exit codes
+
+**0 clean, 1 the thing asked about is wrong, 2 asked wrongly or there was nothing to check** — and "nothing to check" is a refusal, never a quiet pass, because an extractor that finds nothing must not read as "no drift". The reason is a measurement rather than a taste: the survey of what common tools answer to an unknown flag is in [sources.md](sources.md#the-shape), and 2 is the only value with a plurality behind it
+
+- **`"${2:?value required by $1}"` is not a usage guard** — it exits 1 with bash's own message, measured in [pitfalls.md](pitfalls.md#the-interpreter) — so the guard is `(($# >= 2)) || die "-n needs a name"`
+- **A harness whose 1 belongs to the command it runs takes 64–89 instead.** It passes the child command's status through unchanged and puts its own verdicts in a band common test runners do not use: pytest occupies 2 to 5, GNU make 2 and cargo-nextest 4
+
+## The verdict line
+
+- **A finding is one line on stderr prefixed with the script's own name; a clean run ends `<name>: everything holds` on stdout.** The stable prefix makes a planted-defect proof possible: the altered copy must fail *for its own reason*, decided by matching that finding line
+
+## The dispatcher
+
+```sh
+cmd="${1:-}"
+(($# == 0)) || shift
+case "$cmd" in
+  run) cmd_run "$@" ;;
+  stop) cmd_stop "$@" ;;
+  -h | --help | help) usage ;;
+  '')
+    usage >&2
+    exit 2
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+```
+
+- **`check-sh.sh` reads exactly this, out of the syntax tree.** Every top-level `case` over `$cmd` is the dispatcher — more than one where a script answers `-h` before looking for the tools its subcommands need — and each arm's patterns are read one at a time: a bare word is a subcommand, a flag is a flag wherever it sits, `''` and `*` are the refusals, and one arm carries `-h`, `--help` and `help` together so a reader and a completion can count on all three. A dispatcher written inside a heredoc or a string is text and is never read as code, which is what lets a checker carry a template of the shape it checks. A `case "$1"` inside a helper function is a flag parser and not a dispatcher, and a `case "$1"` used *as* the dispatcher is not recognised at all, which is why `cmd="${1:-}"` is mandatory rather than stylistic. `(($# == 0)) || shift` sits before the `case` so `"$@"` in a branch is the subcommand's own arguments, and so an empty invocation reaches the `''` arm instead of shifting an empty stack under `-u`. **Both refusal arms send the help to stderr and exit 2**: a `usage` in the `*)` arm without `>&2` is a finding, and so is a dispatcher with no help arm, since a tool whose help cannot be reached has no single source of truth whatever its header claims. A wrapper is the one exception: its `*)` arm hands the word to the tool behind it and carries the comment `# pass-through` to say so, which opens the subcommand set — the help and the documents may then name that tool's commands, `help` may be one of them, and `-h | --help` are answered as flags before the dispatcher instead
+- **Where the arms fall on the page is the formatter's business and not the checker's.** The patterns arrive already separated, so the spaces around a `|`, an arm written on one line or over four, and the indent are all the same to the check; `shfmt -i 2 -ci` decides them, and the four-line spelling in the block above is what it does to the one-line form ([lint.md](lint.md))
+
+## The flag parser
+
+```sh
+cmd_run() {
+  local dry="" logdir=""
+  while (($#)); do
+    case "$1" in
+      -n | --dry-run)
+        dry=1
+        shift
+        ;;
+      -l | --logdir)
+        (($# >= 2)) || die "-l needs a directory"
+        logdir="$2"
+        shift 2
+        ;;
+      -h | --help) help_run ;;
+      -*)
+        usage >&2
+        exit 2
+        ;;
+      *) break ;;
+    esac
+  done
+  : "${C_LOGDIR:=$logdir}"
+}
+```
+
+- **`check-sh.sh` attributes flags by the function they sit in.** An awk pass brackets functions on `^[a-z_]+\(\) \{` and `^}` (a one-line `usage() { …; }` opens and closes on the same line and brackets nothing): flags inside `cmd_<sub>() {` — the subcommand's name with hyphens turned into underscores, so `bisect-probe` parses in `cmd_bisect_probe` — belong to that subcommand and are held to `help <sub>`, flags at top level are global and held to the general help, and flags in any other function are ignored. A parser hidden in a helper is a parser the checker cannot attribute, and it reads as an undocumented flag. Environment variables are found the same way, by their prefix (`C_LOGDIR` above), and a prefix that matches nothing is itself a finding
+- **`-*)` refuses before `*) break`.** Otherwise an unknown flag falls through to the positional arm and is quietly taken as an argument — the one failure a flag parser has that no test notices. The grammar these flags must follow, and the rows they earn in the help, are in [help.md](help.md)

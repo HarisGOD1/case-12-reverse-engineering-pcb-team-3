@@ -1,0 +1,1899 @@
+#!/usr/bin/env bash
+# Needs bash 3.2, so behaviour mode runs unchanged under the bash a macOS runner has at
+# /bin/bash — the one place this harness has broken before. A check
+# that has never failed is a decoration, and that is the one claim this skill may not
+# make about itself
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+The gate for this repository: lints what the skill ships, then proves that each of its
+checks can actually go red
+
+  check.sh [lint|behaviour|all]
+
+Two halves, because they need different things
+
+  lint        reads what the skill ships — scripts, workflows, docs, markers — with
+              actionlint, shellcheck and shfmt from the flake's dev shell, never from
+              whatever the runner has
+  behaviour   runs t.sh against throwaway repositories; needs only bash and git
+  all         both, and the default
+
+  nix develop -c ./check.sh
+  /bin/bash ./check.sh behaviour        # on a macOS runner
+
+Nothing here touches the network, so it is safe on pull requests
+Exit 0 clean, 1 with `check: <what>` on the first finding or a usage error
+EOF
+}
+
+case "${1:-}" in
+  -h | --help | help)
+    usage
+    exit 0
+    ;;
+esac
+
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+cd "$HERE"
+
+# One source of truth for what gets linted. A second copy of this list drifts, and a
+# drifted list lies about what was checked.
+scripts=(t.sh check.sh check-sh.sh check-skill.sh check-pins.sh check-prose.sh vendor-sync.sh templates/defects.sh tests/upstream.sh)
+
+# The skill's own name, as the frontmatter, the readme and the symlink all spell it
+skill_name=tests
+
+fail() {
+  echo "check: $1" >&2
+  exit 1
+}
+
+# The throwaway repositories below must not inherit whatever git config this machine has:
+# a global commit.gpgsign would try to sign their commits, a core.hooksPath would run
+# somebody's hooks in them, and the gate would go red for a reason outside the repository
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+[[ -z "$(git config --global --list 2>/dev/null)" ]] ||
+  fail "the gate can see a global git config — its fixture repositories would inherit it"
+
+# Every t.sh below runs under the bash running this gate, not under whatever bash the
+# shebang finds: on a macOS runner the gate is started as `/bin/bash ./check.sh` to prove
+# the harness on the 3.2 that macOS ships, while `env bash` finds whichever bash is first
+# on PATH — Homebrew's 5 on a Mac that has one.
+tsh() { "$BASH" "$HERE/t.sh" "$@"; }
+
+# Every call of the vendored drift checker goes through here, so the flag below is decided
+# once. check-sh.sh reads the script it is given as a tree, through shfmt and jq, and
+# --bash-only drops what needs the tree and keeps the rest. The question is whether the
+# tools are here, not which machine this is: a macOS image carries neither, and neither
+# does the runner of falsify.yml's behaviour half, which is documented to need bash and git
+# alone. Asked of the tools, both answers come out right, and a Mac with Homebrew's shfmt
+# gets the whole check
+tree_flag=()
+if ! command -v shfmt >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+  tree_flag=(--bash-only)
+fi
+checker() { "$BASH" "$HERE/check-sh.sh" ${tree_flag[@]+"${tree_flag[@]}"} "$@"; }
+
+# With a template, because the BSD mktemp on macOS wants one
+work=$(mktemp -d "${TMPDIR:-/tmp}/check.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+mode="${1:-all}"
+case "$mode" in
+  lint | behaviour | all) ;;
+  *) fail "no such mode: '$mode' — lint, behaviour or all" ;;
+esac
+
+# Say which tool is missing, rather than dying halfway through with a bare "command not
+# found" that the reader then has to trace back to a step
+tools=(git)
+[[ "$mode" == behaviour ]] || tools+=(actionlint shellcheck shfmt)
+missing=()
+for tool in "${tools[@]}"; do
+  command -v "$tool" >/dev/null || missing+=("$tool")
+done
+((${#missing[@]} == 0)) ||
+  fail "missing: ${missing[*]} — they are pinned in the flake, so run this as: nix develop -c ./check.sh"
+
+# The flags a subcommand's parser accepts, read out of t.sh. Both halves use it: the lint
+# half against the documented examples, the behaviour half against the help — which is why
+# it lives here and not inside either, after a behaviour-only run found it undefined.
+flags_of() { # flags_of SUBCOMMAND [FILE] -> the flags its parser accepts, one per line
+  # The function is found by prefix, not by regex. As a regex, "cmd_bisect()" holds an
+  # empty group and matches cmd_bisect_probe too, which for a while hid that bisect's own
+  # parser declared no flags at all: the probe's -b was being read as bisect's.
+  awk -v want="cmd_${1//-/_}() {" '
+    substr($0, 1, length(want)) == want { inside = 1; next }
+    inside && /^}/ { inside = 0 }
+    inside && match($0, /^ *(--?[a-zA-Z][a-zA-Z-]*)( *\| *--?[a-zA-Z][a-zA-Z-]*)*\)/) {
+      line = substr($0, RSTART, RLENGTH)
+      gsub(/[)| ]/, "\n", line)
+      print line
+    }
+  ' "${2:-t.sh}" | grep -oE '^--?[a-zA-Z][a-zA-Z-]*$' | sort -u
+}
+# Proven on a synthetic file rather than on t.sh, where the two functions happen to agree
+# shellcheck disable=SC2016  # the $1 belongs to the synthetic parser being written out
+printf 'cmd_a() {\n  case "$1" in\n    -x) ;;\n  esac\n}\ncmd_a_b() {\n  case "$1" in\n    -y) ;;\n  esac\n}\n' >"$work/anchor.sh"
+[[ "$(flags_of a "$work/anchor.sh")" == "-x" ]] ||
+  fail "flags_of reads past the function it was asked about: cmd_a_b's flags leaked into cmd_a's"
+# And it reads it quietly. A warning on stderr is this repository's own subject turned on
+# itself: the run stays green, the line scrolls past, and nobody reads it. The one that was
+# here said `\ ` is not a regexp operator — an escape POSIX leaves undefined, so gawk, the
+# awk a macOS runner has and the busybox awk in a 3.2 container are each free to read it
+# differently while the gate reports nothing.
+awk_noise=$(flags_of a "$work/anchor.sh" 2>&1 >/dev/null || :)
+[[ -z "$awk_noise" ]] ||
+  fail "flags_of writes to stderr on an input it reads cleanly: $awk_noise"
+
+check_lint() {
+  echo "== the scripts parse and lint"
+  # No `bash -n` loop: check-sh.sh parses every script it is handed, and it is handed this
+  # repository's own ones below. The vendored copies are byte-equal to sources that parse
+  # them there, which vendor-sync.sh and the lock guarantee, so parsing them again here
+  # would prove nothing about the same bytes
+  shellcheck "${scripts[@]}"
+  shfmt -d -i 2 -ci "${scripts[@]}"
+
+  echo "== the workflows are valid, and their tools come from the lock rather than a registry"
+  # actionlint needs a git project to find workflows in, which the throwaway copies below are
+  # not. Skipping it there is what lets a planted defect be the reason a copy fails; without
+  # this the copies would all die here, and every "able to fail" proof would be vacuous while
+  # the gate stayed green. Outside a nested run the workflows must exist.
+  if [[ -n "${T_CHECK_NESTED:-}" ]]; then
+    echo "   actionlint skipped in the nested copy, which is not a git project"
+  else
+    [[ -d .github/workflows ]] || fail ".github/workflows is missing — nothing gates this repository"
+    actionlint
+    # A template is copied into other repositories, where it has to pass the same linter
+    actionlint templates/github/workflows/falsify.yml
+  fi
+  # This repo follows its own advice about pinning: a job that resolves a tool at run time
+  # changes behaviour with zero change in the repository. The guard is check-pins.sh from
+  # https://github.com/rokokol/ci-skill, vendored, which proves that it catches each shape it
+  # claims to and stays quiet on the pinned spellings. Every vendored copy must still be
+  # the blob .github/vendor.lock records, so one edited here fails by name first.
+  ./vendor-sync.sh check
+  ./check-pins.sh
+  # And the pins have to be watched: a major tag moves within its major on its own, but
+  # nothing says when GitHub retires the runtime an old major runs on, except a red run
+  # with no change in the repository. dependabot's pull request arrives first.
+  [[ -f .github/dependabot.yml ]] ||
+    fail ".github/dependabot.yml is missing — the action pins in the workflows are watched by nobody"
+  grep -q 'package-ecosystem: github-actions' .github/dependabot.yml ||
+    fail ".github/dependabot.yml does not watch the github-actions ecosystem"
+
+  echo "== the flake evaluates for every system it claims, not only for this one"
+  # `nix flake check` reads the system it is run on and says "all checks passed", which is
+  # how this flake named four platforms while one of them could not be evaluated at all:
+  # nixpkgs dropped x86_64-darwin and nothing here noticed, because the gate had never
+  # looked at flake.nix. The list is read out of the flake rather than repeated here, one
+  # eval for all of them, and --offline so the gate's promise about the network still holds.
+  flake_systems=$(nix eval --offline --json '.#devShells' \
+    --apply 'ss: builtins.mapAttrs (n: v: v.default.drvPath) ss' 2>"$work/flake.err") ||
+    fail "the flake claims a system it cannot be evaluated for: $(sed 's/^ *//' "$work/flake.err" | grep -m 1 -E 'error: .+' || tail -1 "$work/flake.err")"
+  [[ "$flake_systems" == *x86_64-linux* ]] ||
+    fail "the flake does not offer a dev shell on x86_64-linux, which is what CI runs the gate on"
+
+  echo "== the Nix this repository holds is formatted"
+  # A `formatter` output nothing runs is a declaration, not a rule: this flake declared
+  # nixfmt-tree while the gate had never asked whether a file obeyed it. nixfmt rather than
+  # `nix fmt`, because the second needs the flake and this is the binary the wrapper calls
+  # find rather than a glob: a .nix file in a subdirectory is as much this repository's as
+  # flake.nix, and a glob that misses one reads as a clean run.
+  # find rather than git ls-files, because this gate runs on a copy of the tree that carries
+  # no .git, and there an empty list would read the same way. Measured: git ls-files made
+  # the untouched copy fail, and every "able to fail" proof below rests on it passing
+  local nixfiles=()
+  while IFS= read -r f; do nixfiles+=("$f"); done < <(find . -name '*.nix' -type f -not -path '*/.git/*')
+  ((${#nixfiles[@]})) || fail "no .nix file is tracked here, yet the flake declares a formatter"
+  nixfmt --check "${nixfiles[@]}" ||
+    fail "a .nix file here is not what nixfmt writes — run nix fmt"
+
+  echo "== SKILL.md loads, every reference is reachable, every link and anchor resolves"
+  # The skill gate from https://github.com/rokokol/skill-authoring-skill, vendored: the frontmatter
+  # an agent loads the skill by, reachability as a real walk over links from SKILL.md, and every
+  # relative link and heading anchor. It falsifies itself on copies of the repository, once:
+  # in a nested copy of this gate its own falsification would prove nothing new, the same
+  # file planting the same defects, and it would run again in every copy the proofs make
+  if [[ -n "${T_CHECK_NESTED:-}" ]]; then
+    CHECK_SKILL_NESTED=1 ./check-skill.sh -n "$skill_name" .
+  else
+    ./check-skill.sh -n "$skill_name" .
+  fi
+
+  echo "== SKILL.md is still short enough to be read in one sitting"
+  # The core is the part an agent loads on every trigger. Every rule that lands in it
+  # costs the attention paid to the others, so detail belongs in references/ and the
+  # file is held to a size: past this, it is a reference wearing the core's name.
+  skill_lines=$(wc -l <SKILL.md)
+  ((skill_lines <= 90)) ||
+    fail "SKILL.md has grown to $skill_lines lines — the core is meant to be read in one sitting; move the detail into references/"
+
+  echo "== every document keeps the house rules a script can decide"
+  # GitHub soft-wraps, so a manual break inside a paragraph only means a one-word edit
+  # reflows every line after it. That rule and the rest of the house style — a bare
+  # paragraph end, the admonition keyword alone on its line, a plain quotation mark, no
+  # heading for something that has its own file — live in
+  # https://github.com/rokokol/create-readme-skill, and check-prose.sh below is its
+  # checker, vendored rather than restated. Two of the rules used to be copied into this
+  # gate as awk, and five repositories held that copy in two spellings that had drifted.
+  # Over every document here, not the readme alone: a reference is read by an agent and by
+  # a person on GitHub alike, and the diff of a one-word edit should be one line in either
+  # Found rather than listed. A hand-kept list is a second place to remember a document
+  # exists, and the one added at the root simply escaped the rule while the gate stayed
+  # green — which is the same shape as the marker sets that had no fixture.
+  docs=()
+  while IFS= read -r f; do docs+=("$f"); done < <(find . -name '*.md' -not -path './.git/*' | sed 's|^\./||' | sort)
+  ((${#docs[@]} > 3)) || fail "the markdown finder came back with ${#docs[@]} documents — it is broken, and everything below would go unchecked"
+  # <<< rather than a pipe: `grep -q` stops at its match and the printf feeding it would
+  # die of SIGPIPE, which pipefail makes the status of a check that passed
+  doc_rows=$(printf '%s\n' "${docs[@]}")
+  grep -q '^references/' <<<"$doc_rows" ||
+    fail "the markdown finder found no reference — it is broken"
+  ./check-prose.sh "${docs[@]}"
+
+  echo "== every t.sh example in the docs uses flags that subcommand actually accepts"
+  # A documented command is a hand-written mirror of the parser, and mirrors drift. This one
+  # drifted the day it was written: two ecosystem references showed `t.sh run -b '...'`, and
+  # `run` has no -b — the build phase belongs to falsify and bisect. Found by somebody trying
+  # to follow the documentation, which is the expensive way to find it.
+  examples=0
+  while IFS= read -r example; do
+    sub=$(awk '{print $2}' <<<"$example")
+    [[ -n "$sub" && "$sub" != -* ]] || continue
+    allowed=$(flags_of "$sub")
+    [[ -n "$allowed" ]] || fail "the docs show 't.sh $sub' but no cmd_$sub parses anything — the extractor or the example is wrong"
+    examples=$((examples + 1))
+    # only the part before --, which is where flags live, and with quoted arguments
+    # removed: the --workspace inside -b 'cargo build --workspace' is the build's flag
+    before_ddash="${example%% -- *}"
+    # shellcheck disable=SC2001  # ${var//'*'/} would be greedy across two quoted arguments
+    before_ddash=$(sed "s/'[^']*'//g" <<<"$before_ddash")
+    # `\b` would be shorter, and is GNU-only
+    for flag in $(grep -oE ' --?[a-zA-Z][a-zA-Z-]*( |$)' <<<"$before_ddash" || :); do
+      grep -qx -- "${flag# }" <<<"$allowed" ||
+        fail "the docs show 't.sh $sub ${flag# }', which that subcommand does not accept: $example"
+    done
+  done < <(grep -rhoE '(^|\$ )t\.sh [a-z-]+[^|`]*' README.md SKILL.md references/ | sed 's/^\$ //')
+  ((examples > 0)) || fail "no t.sh examples were found in the docs — the extractor is broken"
+
+  echo "== every marker catches its own fixture, and none cries on a healthy run"
+  # Read from the same files `t.sh run` reads, never from a second copy of the list: two
+  # copies disagree within a month, and then the gate is testing the copy.
+  #
+  # Every marker must catch a line in its set's lying fixture, and stay quiet on a real
+  # healthy run of the tool it is for, kept under tests/fixtures/clean/. The default set
+  # applies to every run, so it must stay quiet on every ecosystem's healthy run. An
+  # ecosystem set need only stay quiet on its own: `[no test files]` appears in a healthy
+  # Go workspace, which is why the Go set is opted into, but it must not appear in the run
+  # the Go set is meant for — a module where every package has tests. The rust set once
+  # carried `0 filtered out`, which every healthy cargo test prints, and nothing said so
+  # until the healthy run was kept.
+  set_count=0
+  for set_file in markers/*.txt; do
+    name=$(basename "$set_file" .txt)
+    fixture="tests/fixtures/lying/$name.log"
+    clean="tests/fixtures/clean/$name.log"
+    [[ -r "$fixture" ]] || fail "$set_file has no fixture at $fixture — its entries are unproven"
+    [[ "$name" == default || -r "$clean" ]] ||
+      fail "$set_file has no healthy run at $clean — nothing proves its entries stay quiet on one"
+    markers=()
+    while IFS= read -r m; do
+      [[ -z "$m" || "$m" == \#* ]] && continue
+      markers+=("$m")
+    done <"$set_file"
+    # An extractor that finds nothing must say so rather than read as "all clear"
+    ((${#markers[@]} > 0)) || fail "$set_file holds no markers — an empty set checks nothing"
+    for m in "${markers[@]}"; do
+      grep -qiF -- "$m" "$fixture" ||
+        fail "the marker '$m' matches nothing in $fixture — a dead entry guards nothing"
+      if [[ "$name" == default ]]; then
+        for healthy in tests/fixtures/clean/*.log; do
+          ! grep -qiF -- "$m" "$healthy" ||
+            fail "the default marker '$m' fires on $healthy — it would redden healthy runs"
+        done
+      else
+        ! grep -qiF -- "$m" "$clean" ||
+          fail "the marker '$m' fires on $clean, its own healthy run — it would redden every run it is meant for"
+      fi
+    done
+    set_count=$((set_count + 1))
+  done
+  ((set_count > 0)) || fail "no marker sets were found in markers/ — the glob is broken"
+
+  # An ecosystem set repeating a default entry adds nothing: the default already applies to
+  # every run, so the copy is dead weight that reads as extra coverage. Matched the way the
+  # scan matches, case-insensitively and by containment: `No Tests Ran in 0.01s` repeats
+  # `no tests ran` as surely as the same letters would, and an exact comparison missed both.
+  defaults=()
+  while IFS= read -r m; do
+    [[ -z "$m" || "$m" == \#* ]] && continue
+    defaults+=("$(tr '[:upper:]' '[:lower:]' <<<"$m")")
+  done <markers/default.txt
+  ((${#defaults[@]} > 0)) || fail "markers/default.txt holds no markers — the extractor is broken"
+  for set_file in markers/*.txt; do
+    [[ "$set_file" == markers/default.txt ]] && continue
+    while IFS= read -r m; do
+      [[ -z "$m" || "$m" == \#* ]] && continue
+      lower=$(tr '[:upper:]' '[:lower:]' <<<"$m")
+      for d in "${defaults[@]}"; do
+        [[ "$lower" != *"$d"* ]] ||
+          fail "$set_file repeats a marker that markers/default.txt already applies to every run: '$m' contains '$d'"
+      done
+    done <"$set_file"
+  done
+}
+
+check_behaviour() {
+  # Several checks below send a real INT — to a command bisect-probe runs, to a falsify in
+  # flight — and a gate started as a job with & inherits INT ignored. set -m gives it back
+  # only to a shell that did not inherit the ignore, and POSIX lets no shell below undo
+  # one, so those checks would go red on correct code. The mechanism is asked directly,
+  # and the gate refuses before it spends minutes reaching them
+  int_status=0
+  sh -c 'kill -INT $$' || int_status=$?
+  ((int_status == 130)) ||
+    fail "INT is ignored in this shell (a child sent it exited $int_status) — the gate was started as a job with & or under a parent that ignores INT, and its interrupt checks cannot run there; start it in the foreground"
+
+  echo "== run refuses a marker set that would leave it checking nothing"
+  status=0
+  tsh run -t 0 -l "$work/logs" -m no-such-set -- true >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "run accepted a marker set that does not exist (got $status)"
+  : >"$work/empty-markers.txt"
+  status=0
+  tsh run -t 0 -l "$work/logs" -m "$work/empty-markers.txt" -- true >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "run accepted an empty marker set, which reads as a working check (got $status)"
+
+  echo "== a repository's own policy applies, and a broken one stops the run"
+  # The config carries policy and never the command, so what runs stays visible in the line
+  # you typed. Its failure mode to avoid is silence: a typo'd key that reads as "no policy"
+  # leaves a repository believing in markers that were never loaded.
+  conf="$work/conf"
+  mkdir -p "$conf/tests"
+  policy() { printf '%s\n' "$@" >"$conf/tests/t.conf"; }
+  in_conf() { # in_conf EXPECTED DESCRIPTION -- CMD...
+    local expected="$1" what="$2"
+    shift 2
+    local got=0
+    (cd "$conf" && tsh run -t 0 -l "$work/logs" "$@") >/dev/null 2>&1 || got=$?
+    ((got == expected)) || fail "$what: expected $expected, got $got"
+  }
+  policy 'markers rust'
+  in_conf 79 "a marker set named in the config applies" -- sh -c 'echo "running 0 tests"; exit 0'
+  policy 'pattern thread panicked in setup'
+  in_conf 79 "a pattern named in the config applies" -- sh -c 'echo "thread panicked in setup"; exit 0'
+  policy 'allow expected: no tests ran'
+  in_conf 0 "a line the config excuses is excused" -- sh -c 'echo "expected: no tests ran"; exit 0'
+  policy 'allow expected('
+  in_conf 64 "an allow regex the config names but grep cannot compile refuses" -- sh -c 'echo "collected 0 items"; exit 0'
+  # flaky obeys the same policy: a repository that named its log directory once should not
+  # find one subcommand writing somewhere else
+  policy 'logdir .from-config'
+  rm -rf "$conf/.from-config"
+  (cd "$conf" && tsh flaky 2 -- sh -c 'echo "1 passed"; exit 0') >/dev/null 2>&1 || :
+  [[ -d "$conf/.from-config" ]] || fail "flaky ignored the log directory the config names"
+  rm -rf "$conf/.from-config"
+  policy 'command cargo test'
+  in_conf 64 "an unknown key refuses rather than reading as no policy" -- true
+  policy 'markers'
+  in_conf 64 "a key with no value refuses" -- true
+  policy 'markers nosuchset'
+  in_conf 64 "a marker set the config names but does not exist refuses" -- true
+  rm -f "$conf/tests/t.conf"
+  in_conf 0 "a repository with no config is the normal case" -- sh -c 'echo "47 passed"; exit 0'
+  # The template is the thing people copy, so it has to parse — an example config that the
+  # harness refuses would teach the format wrong on the first try
+  status=0
+  T_CONFIG=templates/t.conf tsh run -t 0 -l "$work/logs" -- sh -c 'echo "47 passed"; exit 0' \
+    >/dev/null 2>&1 || status=$?
+  ((status == 0)) || fail "templates/t.conf is not a config t.sh accepts (got $status)"
+
+  echo "== a directory t.sh makes ignores itself, and one it did not make is left alone"
+  # Asked of every repository as a line for its .gitignore, the logs still landed in a
+  # `git add -A` twice in one afternoon; a directory carrying its own .gitignore needs
+  # nobody to remember it. One that was there before is somebody's: `-l .` must not end up
+  # ignoring the repository
+  ign="$work/ignores"
+  git init -q "$ign"
+  (cd "$ign" && tsh run -t 0 -- sh -c 'echo "1 passed"; exit 0') >/dev/null 2>&1 || :
+  [[ -z "$(git -C "$ign" status --porcelain --untracked-files=all)" ]] ||
+    fail "run's own log directory shows up in git status: $(git -C "$ign" status --porcelain --untracked-files=all)"
+  mkdir -p "$ign/mine"
+  (cd "$ign" && tsh run -t 0 -l mine -- sh -c 'echo "1 passed"; exit 0') >/dev/null 2>&1 || :
+  [[ ! -e "$ign/mine/.gitignore" ]] || fail "run wrote a .gitignore into a directory it did not create"
+
+  echo "== a marker file checked out with CRLF does not turn every line into a finding"
+  # Reported from a Windows runner, where git's autocrlf converts on checkout: a blank line
+  # becomes a marker of one carriage return, `grep -F` finds that on every line of a CRLF
+  # log, and a healthy `cargo test` is reported as a lie with a build line as the evidence.
+  # The worst shape a marker bug can take — it reddens good runs, so it gets switched off.
+  crlf_markers="$work/crlf-markers.txt"
+  printf '# a comment\r\n\r\nno tests ran\r\ncollected 0 items\r\n' >"$crlf_markers"
+  status=0
+  tsh run -t 0 -l "$work/logs" -m "$crlf_markers" \
+    -- sh -c 'printf "Compiling windows-link v0.2.1\r\ntest result: ok. 12 passed\r\n"; exit 0' \
+    >/dev/null 2>&1 || status=$?
+  ((status == 0)) || fail "a CRLF marker file reddened a healthy CRLF run (got $status)"
+  status=0
+  tsh run -t 0 -l "$work/logs" -m "$crlf_markers" \
+    -- sh -c 'printf "collected 0 items\r\n"; exit 0' >/dev/null 2>&1 || status=$?
+  ((status == 79)) || fail "a CRLF marker file stopped catching what it names (got $status)"
+
+  echo "== run reports the command's own status, where a pipe would report zero"
+  # The whole reason this harness exists: `cmd | tail` exits 0 for a suite that just failed
+  status=0
+  tsh run -t 0 -l "$work/logs" -- sh -c 'echo working; exit 7' >/dev/null 2>&1 || status=$?
+  ((status == 7)) || fail "run reported $status for a command that exited 7"
+  # And the premise still holds: in a shell without pipefail — the default everywhere, and
+  # what a Makefile recipe or a CI `run:` step gets — that same pipe reports success.
+  premise=0
+  (
+    set +o pipefail
+    sh -c 'echo working; exit 7' | tail -n 1 >/dev/null 2>&1
+  ) || premise=$?
+  ((premise == 0)) || fail "the premise changed: a tail pipe no longer hides a failure (got $premise)"
+
+  echo "== a run that exits 0 while its log says otherwise is not a pass"
+  status=0
+  tsh run -t 0 -l "$work/logs" -- sh -c 'echo "collected 0 items"; exit 0' >/dev/null 2>&1 || status=$?
+  ((status == 79)) || fail "run reported $status for a green run whose log said no tests were collected"
+
+  echo "== an honest green run is still a pass"
+  status=0
+  tsh run -t 0 -l "$work/logs" -- sh -c 'echo "47 passed in 1.83s"; exit 0' >/dev/null 2>&1 || status=$?
+  ((status == 0)) || fail "run reported $status for a healthy run — it would cry wolf"
+
+  echo "== run writes the kind of verdict it reached beside the log"
+  # A number cannot say whether 79 was the harness's verdict or the command's own status,
+  # so the kind goes in a sidecar, and the subcommands that run cmd_run in a subshell
+  # read that instead of guessing from the number
+  for pair in 'fail:exit 7' 'lied:echo "collected 0 items"; exit 0' 'pass:echo "47 passed"; exit 0'; do
+    want=${pair%%:*}
+    cmd=${pair#*:}
+    rm -f "$work/verdict.log" "$work/verdict.log.verdict"
+    T_LOGFILE="$work/verdict.log" tsh run -t 0 -l "$work/logs" -- sh -c "$cmd" >/dev/null 2>&1 || :
+    grep -qx "$want" "$work/verdict.log.verdict" 2>/dev/null ||
+      fail "run did not record '$want' beside its log for: $cmd"
+  done
+
+  echo "== the command run does not see the harness's own log file"
+  # flaky, prove and bisect-probe hand run its log file through T_LOGFILE, and a suite that
+  # runs t.sh itself, as this gate does, then wrote into the outer run's log and cut it short
+  rm -f "$work/outer.log"
+  # shellcheck disable=SC2016  # the ${...} belongs to the command's own sh
+  T_LOGFILE="$work/outer.log" tsh run -t 0 -l "$work/logs" -- sh -c 'echo "child sees [${T_LOGFILE-unset}]"' >/dev/null 2>&1 || :
+  grep -qxF 'child sees [unset]' "$work/outer.log" ||
+    fail "the command run saw the harness's own T_LOGFILE: $(cat "$work/outer.log")"
+
+  echo "== T_ALLOW excuses a marker the repository expects, and nothing else"
+  status=0
+  T_ALLOW='expected: no tests ran' tsh run -t 0 -l "$work/logs" \
+    -- sh -c 'echo "expected: no tests ran"; exit 0' >/dev/null 2>&1 || status=$?
+  ((status == 0)) || fail "T_ALLOW did not excuse the line it names (got $status)"
+  status=0
+  T_ALLOW='something else entirely' tsh run -t 0 -l "$work/logs" \
+    -- sh -c 'echo "expected: no tests ran"; exit 0' >/dev/null 2>&1 || status=$?
+  ((status == 79)) || fail "T_ALLOW excused a line it does not name (got $status) — it excuses everything"
+  # A regex grep cannot compile used to leave the filtered log empty, and an empty log has
+  # no markers: the worst shape, because a typo in the excuse list made every run a pass
+  status=0
+  T_ALLOW='expected(' tsh run -t 0 -l "$work/logs" \
+    -- sh -c 'echo "collected 0 items"; exit 0' >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "a regex grep cannot compile was accepted as an allow list (got $status) — an empty filtered log reads as clean"
+
+  echo "== run refuses to start when its log cannot be written"
+  # A lost log silently cancels half of what this harness is for, so it is a refusal up
+  # front rather than a discovery afterwards. Root can write anywhere, so it cannot be asked.
+  if [[ $EUID -eq 0 ]]; then
+    echo "   skipped: running as root, which can write into a read-only directory"
+  else
+    readonly_dir="$work/readonly"
+    mkdir -p "$readonly_dir"
+    chmod a-w "$readonly_dir"
+    status=0
+    tsh run -t 0 -l "$readonly_dir" -- sh -c 'exit 0' >/dev/null 2>&1 || status=$?
+    ((status == 70)) || fail "run started with nowhere to put its log (got $status)"
+  fi
+
+  echo "== run refuses a command that was not put after --"
+  status=0
+  tsh run sh -c 'exit 0' >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "run accepted a command without -- (got $status); guessing is how the wrong thing gets run"
+
+  echo "== run refuses a tail length that is not a number, and counts a marker set once"
+  status=0
+  tsh run -t abc -l "$work/logs" -- sh -c 'exit 1' >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "run accepted -t abc (got $status); (( )) reads a word as zero, so the tail silently vanished"
+  # A value flag given last, with its value missing. ${2:?} answered that with 1 and
+  # bash's own text, and 1 is what a failing CMD exits — a usage error read as a red run.
+  # Every parser's value flags, each spelled where its subcommand takes flags
+  for call in "run -l" "run -m" "run -p" "run -t" \
+    "flaky 2 -l" "flaky 2 -m" "flaky 2 -p" "flaky 2 -t" \
+    "bisect-probe -b" "bisect-probe -l" "bisect-probe -m" "bisect-probe -p" "bisect-probe -t" \
+    "pollute -l" "pollute -m" "pollute -p" "pollute -t" \
+    "quarantine --on" \
+    "bisect HEAD -b" "bisect HEAD -m" "bisect HEAD -p" "bisect HEAD -t" \
+    "falsify -d" "falsify --since" "falsify --shard" "falsify --out" "falsify --timeout" \
+    "falsify -b" "falsify -l" "falsify -m" "falsify -p" "falsify -t" \
+    "prove -b" "prove --timeout" "prove -l" "prove -m" "prove -p" "prove -t"; do
+    status=0
+    # shellcheck disable=SC2086 # the call is split into its words on purpose
+    tsh $call >/dev/null 2>&1 || status=$?
+    ((status == 64)) || fail "t.sh $call with no value exited $status, not the usage code 64 — 1 is indistinguishable from CMD failing"
+  done
+  findings=$(tsh run -t 0 -m rust -m rust -l "$work/logs" -- sh -c 'echo "running 0 tests"; exit 0' 2>&1 |
+    grep -c '^  \[running 0 tests\]' || :)
+  ((findings == 1)) || fail "a marker set named twice printed its finding $findings times, not once"
+
+  echo "== run finds its markers through a symlink, absolute and relative"
+  # `ln -s .../t.sh ~/.local/bin/t.sh` is how the harness gets onto a PATH. dirname of the
+  # link once looked for markers/ beside the link, so every run through it refused.
+  mkdir -p "$work/bin" "$work/rel/bin"
+  ln -s "$HERE/t.sh" "$work/bin/t.sh"
+  ln -s ../../bin/t.sh "$work/rel/bin/t.sh"
+  for link in "$work/bin/t.sh" "$work/rel/bin/t.sh"; do
+    status=0
+    "$link" run -t 0 -l "$work/logs" -- sh -c 'echo "47 passed"; exit 0' >/dev/null 2>&1 || status=$?
+    ((status == 0)) || fail "run through the symlink $link could not find its markers (got $status)"
+  done
+
+  echo "== flaky calls a command that always agrees with itself stable"
+  status=0
+  tsh flaky 3 -l "$work/logs" -- sh -c 'echo "3 passed"; exit 0' >/dev/null 2>&1 || status=$?
+  ((status == 0)) || fail "flaky called a deterministic green command unstable (got $status)"
+  status=0
+  tsh flaky 3 -l "$work/logs" -- sh -c 'echo "1 failed"; exit 1' >/dev/null 2>&1 || status=$?
+  ((status == 1)) || fail "flaky did not pass through the status of a command that always fails (got $status)"
+
+  echo "== flaky notices a command that disagrees with itself"
+  # Deterministic divergence: the first run passes, every run after it fails
+  counter="$work/flaky-counter"
+  rm -f "$counter"
+  status=0
+  # shellcheck disable=SC2016  # $0 and $n belong to the inner sh, not to this script
+  tsh flaky 3 -l "$work/logs" -- \
+    sh -c 'n=$(cat "$0" 2>/dev/null || echo 0); echo $((n + 1)) >"$0"; test "$n" -eq 0' "$counter" \
+    >/dev/null 2>&1 || status=$?
+  ((status == 86)) || fail "flaky missed a command whose runs disagreed (got $status)"
+
+  echo "== pollute halves the order and names the test that poisons another"
+  # The runner here is a shell script rather than a real suite: what is being checked is the
+  # halving and the two premises it rests on, not anybody's pytest
+  po="$work/pollute"
+  mkdir -p "$po"
+  cat >"$po/suite.sh" <<'POLLUTE'
+#!/bin/sh
+poisoned=0
+for t in "$@"; do
+  [ "$t" = poison ] && poisoned=1
+  if [ "$t" = victim ] && [ "$poisoned" = 1 ]; then
+    echo "1 failed: victim"
+    exit 1
+  fi
+done
+echo "$# passed"
+POLLUTE
+  cat >"$po/broken.sh" <<'POLLUTE'
+#!/bin/sh
+for t in "$@"; do [ "$t" = victim ] && { echo "1 failed: victim"; exit 1; }; done
+echo "$# passed"
+POLLUTE
+  cat >"$po/pair.sh" <<'POLLUTE'
+#!/bin/sh
+p=0
+q=0
+for t in "$@"; do
+  [ "$t" = p1 ] && p=1
+  [ "$t" = p2 ] && q=1
+  if [ "$t" = victim ] && [ "$p" = 1 ] && [ "$q" = 1 ]; then
+    echo "1 failed: victim"
+    exit 1
+  fi
+done
+echo "$# passed"
+POLLUTE
+  status=0
+  po_out=$(printf 'a\nb\nc\npoison\nd\ne\nf\ng\n' | tsh pollute victim -l "$work/logs" -- sh "$po/suite.sh" 2>&1) || status=$?
+  ((status == 0)) || fail "pollute exited $status where one of eight candidates poisons the victim (want 0):"$'\n'"$po_out"
+  grep -q 'fails when poison has run before it' <<<"$po_out" ||
+    fail "pollute did not name the polluter among eight candidates:"$'\n'"$po_out"
+  # An order with nothing wrong in it is an answer, not a failure
+  status=0
+  po_out=$(printf 'a\nb\nc\n' | tsh pollute victim -l "$work/logs" -- sh "$po/suite.sh" 2>&1) || status=$?
+  ((status == 0)) || fail "pollute exited $status on an order holding no polluter (want 0):"$'\n'"$po_out"
+  grep -q 'nothing to find' <<<"$po_out" || fail "pollute did not say the order holds nothing:"$'\n'"$po_out"
+  # Both premises, because a search whose premises do not hold answers the wrong question
+  # confidently: a victim that fails alone is broken rather than polluted
+  status=0
+  po_out=$(printf 'a\nb\n' | tsh pollute victim -l "$work/logs" -- sh "$po/broken.sh" 2>&1) || status=$?
+  ((status == 85)) || fail "pollute exited $status on a victim that fails by itself (want 85):"$'\n'"$po_out"
+  # And when no single test explains it, saying so beats naming whichever the split left
+  status=0
+  po_out=$(printf 'p1\na\nb\np2\n' | tsh pollute victim -l "$work/logs" -- sh "$po/pair.sh" 2>&1) || status=$?
+  ((status == 82)) || fail "pollute exited $status where two tests together poison the victim (want 82):"$'\n'"$po_out"
+  grep -q 'needs more than one' <<<"$po_out" ||
+    fail "pollute named a single test for a pollution that needs two:"$'\n'"$po_out"
+  status=0
+  printf 'a\n' | tsh pollute victim -l "$work/logs" sh "$po/suite.sh" >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "pollute accepted a command that was not put after -- (got $status)"
+  status=0
+  printf '' | tsh pollute victim -l "$work/logs" -- sh "$po/suite.sh" >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "pollute accepted an empty candidate list, which can prove nothing (got $status)"
+
+  echo "== quarantine refuses a row nobody came back to, and one that can never come up"
+  # A deadline is the whole point of the file: without one, a test taken out of the gate is
+  # deleted with extra steps. --on is what lets this be checked without waiting for a date
+  qd="$work/quarantine"
+  mkdir -p "$qd"
+  # shellcheck disable=SC2016  # markdown backticks in a fixture table, not a substitution
+  {
+    printf '# Quarantine\n\n'
+    printf '| test | since | category | suspected cause | owner | expires | restore |\n'
+    printf '|---|---|---|---|---|---|---|\n'
+    printf '| `tests/test_sync.py::test_retry` | 2026-09-07 | timing | a sleep for a socket close | @name | 2026-09-21 | remove the mark |\n'
+    printf '| `tests/test_api.py::test_backoff` | 2026-08-01 | order | leaks a global | @name | 2026-08-15 | remove the mark |\n'
+    printf '| `tests/test_slow.py::test_batch` | 2026-09-01 | resource | needs a big machine | @name | soon | remove the mark |\n'
+  } >"$qd/quarantine.md"
+  status=0
+  q_out=$(tsh quarantine --on 2026-09-08 "$qd/quarantine.md" 2>&1) || status=$?
+  ((status == 81)) || fail "quarantine exited $status on a table holding an expired row (want 81):"$'\n'"$q_out"
+  grep -q 'test_backoff' <<<"$q_out" || fail "quarantine did not name the row past its expiry:"$'\n'"$q_out"
+  grep -q 'test_batch' <<<"$q_out" ||
+    fail "quarantine accepted a row whose expiry is not a date — such a row can never come up for review:"$'\n'"$q_out"
+  ! grep -q 'test_retry' <<<"$q_out" ||
+    fail "quarantine reported a row still inside its date — a gate that cries wolf gets switched off:"$'\n'"$q_out"
+  # The same table read from before that deadline: the expired row is not expired yet
+  status=0
+  q_out=$(tsh quarantine --on 2026-08-01 "$qd/quarantine.md" 2>&1) || status=$?
+  ! grep -q 'test_backoff' <<<"$q_out" ||
+    fail "quarantine called a row expired on a date before its expiry:"$'\n'"$q_out"
+  # A table with no expiry column is not a quarantine file, and saying so is better than
+  # reading zero rows and calling it clean
+  # shellcheck disable=SC2016  # markdown backticks in a fixture table, not a substitution
+  printf '# Quarantine\n\n| test | owner |\n|---|---|\n| `t` | @name |\n' >"$qd/noexpiry.md"
+  status=0
+  tsh quarantine --on 2026-09-08 "$qd/noexpiry.md" >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "quarantine accepted a table with no expires column (got $status)"
+  status=0
+  tsh quarantine --on 2026-09-08 "$qd/not-here.md" >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "quarantine accepted a file that does not exist (got $status)"
+  status=0
+  tsh quarantine --on soon "$qd/quarantine.md" >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "quarantine accepted an --on that is not a date (got $status)"
+
+  echo "== focused finds the modifier that runs one test and skips the rest of its file"
+  # No runner reports a stray `.only`: jest and vitest print a skip count, which is what a
+  # suite skipping a platform test prints too, and both exit 0. It cannot be a marker, so it
+  # is a scan of the source — and a scan is only worth having if it is quiet on the
+  # lookalikes, which is half of what is checked here.
+  foc="$work/focused"
+  mkdir -p "$foc/src" "$foc/node_modules/dep" "$foc/clean"
+  printf 'describe("a suite", () => {\n  it.only("the only one that runs", () => {});\n  it("never runs", () => {});\n});\n' >"$foc/src/a.test.js"
+  printf "fdescribe 'a focused group' do\n  fit 'a focused example' do\n  end\nend\n" >"$foc/src/b.spec.rb"
+  # Neither of these is a focused test, and a scan that says they are gets switched off
+  printf 'double curve_fit(double *xs) { return 0.0; }\nconst char *m = "the report should fit(and not trip it)";\n' >"$foc/src/innocent.c"
+  printf 'test.only("somebody else problem", () => {});\n' >"$foc/node_modules/dep/d.test.js"
+  printf 'test("runs like the rest", () => {});\n' >"$foc/clean/c.test.js"
+  status=0
+  foc_out=$(tsh focused "$foc/src" 2>&1) || status=$?
+  ((status == 80)) || fail "focused exited $status on a tree holding three focus modifiers (want 80):"$'\n'"$foc_out"
+  for want in 'a.test.js' 'b.spec.rb:1' 'b.spec.rb:2'; do
+    grep -q "$want" <<<"$foc_out" || fail "focused did not name $want:"$'\n'"$foc_out"
+  done
+  ! grep -q 'innocent.c' <<<"$foc_out" ||
+    fail "focused reported curve_fit( or the word inside a string — a scan that cries wolf is switched off within a day:"$'\n'"$foc_out"
+  status=0
+  foc_out=$(tsh focused "$foc/clean" 2>&1) || status=$?
+  ((status == 0)) || fail "focused exited $status on a tree holding no focus modifier (want 0):"$'\n'"$foc_out"
+  # Somebody else's focused test is not this repository's problem until it is asked for
+  status=0
+  foc_out=$(tsh focused "$foc" 2>&1) || status=$?
+  ! grep -q 'node_modules' <<<"$foc_out" || fail "focused looked inside node_modules without being asked:"$'\n'"$foc_out"
+  status=0
+  foc_out=$(tsh focused --any-file "$foc" 2>&1) || status=$?
+  grep -q 'node_modules' <<<"$foc_out" || fail "focused --any-file did not look inside node_modules:"$'\n'"$foc_out"
+  status=0
+  tsh focused --no-such-flag "$foc" >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "focused accepted a flag it does not have (got $status)"
+  status=0
+  tsh focused "$work/no-such-path" >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "focused accepted a path that does not exist (got $status)"
+
+  echo "== flaky refuses the arguments that would make it meaningless"
+  status=0
+  tsh flaky 1 -l "$work/logs" -- sh -c 'exit 0' >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "flaky accepted a single run, which cannot show disagreement (got $status)"
+  status=0
+  tsh flaky 3 -l "$work/logs" sh -c 'exit 0' >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "flaky accepted a command that was not put after -- (got $status)"
+  # A refusal has to be heard. flaky mutes the command's output for each run, and for a
+  # while muted run's own refusals with it: `flaky 3 -x` exited 2 without a word.
+  status=0
+  tsh flaky 3 -x -l "$work/logs" -- sh -c 'exit 0' >/dev/null 2>"$work/flaky.err" || status=$?
+  ((status == 64)) || fail "flaky accepted an unknown flag (got $status)"
+  grep -q 'flaky:' "$work/flaky.err" || fail "flaky refused an unknown flag without saying so"
+  status=0
+  tsh flaky 3 -m no-such-set -l "$work/logs" -- sh -c 'exit 0' >/dev/null 2>"$work/flaky.err" || status=$?
+  ((status == 64)) || fail "flaky accepted a marker set that does not exist (got $status)"
+  [[ -s "$work/flaky.err" ]] || fail "flaky refused a marker set silently"
+  # And a refusal only run can make, once the loop has started, is shown too
+  status=0
+  T_ALLOW='expected(' tsh flaky 3 -l "$work/logs" -- sh -c 'exit 0' >/dev/null 2>"$work/flaky.err" || status=$?
+  ((status == 70)) || fail "flaky carried on after run refused its allow regex (got $status)"
+  grep -q 'allow' "$work/flaky.err" || fail "flaky hid run's refusal of the allow regex"
+
+  echo "== bisect names the commit that broke it, across a history holding an unbuildable one"
+  # A throwaway history where the answer is known in advance. The commit in the middle that
+  # does not build is the whole point: git bisect run treats a raw nonzero as "bad", so a
+  # harness that does not turn "cannot build" into a skip confidently blames the wrong commit.
+  repo="$work/bisect-repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b master
+  git -C "$repo" config user.name check
+  git -C "$repo" config user.email check@example.invalid
+  commit() { # commit MESSAGE
+    git -C "$repo" add -A
+    git -C "$repo" commit -q -m "$1"
+    git -C "$repo" rev-parse HEAD
+  }
+  : >"$repo/builds"
+  : >"$repo/passes"
+  first_good=$(commit "good: it builds and the test passes")
+  rm "$repo/builds"
+  commit "untestable: this commit does not build" >/dev/null
+  # A testable good commit has to sit between the unbuildable one and the breakage, or the
+  # answer is genuinely ambiguous: with the middle commit skipped, "first bad" could be
+  # either it or the one after, and git would be right to say so.
+  : >"$repo/builds"
+  commit "good again, and testable" >/dev/null
+  rm "$repo/passes"
+  first_bad=$(commit "bad: it builds, and the test fails")
+  echo change >"$repo/note"
+  commit "bad too, further along" >/dev/null
+
+  status=0
+  bisect_out=$(cd "$repo" && tsh bisect "$first_good" -b 'test -f builds' -- test -f passes 2>&1) ||
+    status=$?
+  ((status == 0)) || fail "bisect exited $status on a history it should have resolved:"$'\n'"$bisect_out"
+  grep -qF "$first_bad" <<<"$bisect_out" ||
+    fail "bisect did not name $first_bad as the first bad commit:"$'\n'"$bisect_out"
+  # And it must leave the repository where it found it, not detached mid-bisect
+  [[ "$(git -C "$repo" rev-parse --abbrev-ref HEAD)" == master ]] ||
+    fail "bisect left the repository detached instead of resetting it"
+  # git's session log is the one artifact a wrong answer can be corrected from
+  bisect_logdir=$(sed -n 's/^t.sh: logs for this bisect are in //p' <<<"$bisect_out")
+  [[ -f "$bisect_logdir/bisect.log" ]] || fail "bisect did not keep git's session log for a replay"
+  # git's own options pass through to git bisect start
+  status=0
+  bisect_out=$(cd "$repo" && tsh bisect "$first_good" --first-parent -b 'test -f builds' -- test -f passes 2>&1) ||
+    status=$?
+  ((status == 0)) || fail "bisect exited $status with --first-parent on a linear history:"$'\n'"$bisect_out"
+  grep -qF "$first_bad" <<<"$bisect_out" || fail "bisect with --first-parent did not name $first_bad"
+
+  echo "== bisect says so when every commit between good and bad was skipped"
+  # git prints "cannot continue any more" and exits nonzero; passed through raw, that once
+  # read as a usage error, and the harness said nothing of its own about the answer
+  stuck="$work/bisect-stuck"
+  mkdir -p "$stuck"
+  git -C "$stuck" init -q -b master
+  git -C "$stuck" config user.name check
+  git -C "$stuck" config user.email check@example.invalid
+  : >"$stuck/builds"
+  git -C "$stuck" add -A && git -C "$stuck" commit -q -m "good: it builds"
+  stuck_good=$(git -C "$stuck" rev-parse HEAD)
+  rm "$stuck/builds"
+  git -C "$stuck" add -A && git -C "$stuck" commit -q -m "does not build"
+  echo x >"$stuck/note" && git -C "$stuck" add -A && git -C "$stuck" commit -q -m "still does not build"
+  status=0
+  stuck_out=$(cd "$stuck" && tsh bisect "$stuck_good" -b 'test -f builds' -- false 2>&1) || status=$?
+  ((status == 89)) || fail "bisect exited $status where nothing between good and bad could answer (want 89):"$'\n'"$stuck_out"
+  grep -q 'INCONCLUSIVE' <<<"$stuck_out" || fail "bisect did not say its answer was inconclusive"
+  [[ "$(git -C "$stuck" rev-parse --abbrev-ref HEAD)" == master ]] ||
+    fail "an inconclusive bisect left the repository detached"
+
+  echo "== bisect refuses a HEAD that passes, instead of naming it"
+  # A search whose premises do not hold answers the wrong question with confidence: told
+  # HEAD is bad when it is not, git visits commits that all pass, marks each good, converges
+  # on HEAD and names it — which this printed, with exit 0, until the premise was measured
+  fine="$work/bisect-fine"
+  mkdir -p "$fine"
+  git -C "$fine" init -q -b master
+  git -C "$fine" config user.name check
+  git -C "$fine" config user.email check@example.invalid
+  for n in 1 2 3 4; do
+    printf 'commit %s\n' "$n" >"$fine/note"
+    git -C "$fine" add -A && git -C "$fine" commit -q -m "commit $n, and it passes"
+  done
+  fine_good=$(git -C "$fine" rev-parse HEAD~3)
+  status=0
+  fine_out=$(cd "$fine" && tsh bisect "$fine_good" -- true 2>&1) || status=$?
+  ((status == 85)) || fail "bisect exited $status over a history where every commit passes (want 85):"$'\n'"$fine_out"
+  grep -q 'HEAD passes' <<<"$fine_out" || fail "bisect did not say HEAD passes:"$'\n'"$fine_out"
+  [[ "$(git -C "$fine" rev-parse --abbrev-ref HEAD)" == master ]] ||
+    fail "a refused bisect left the repository detached"
+
+  echo "== bisect refuses to start over a bisect already in progress"
+  # git bisect start resets an in-progress bisect without a word
+  git -C "$repo" bisect start >/dev/null
+  status=0
+  (cd "$repo" && tsh bisect "$first_good" -- true) >/dev/null 2>&1 || status=$?
+  git -C "$repo" bisect reset >/dev/null 2>&1
+  ((status == 64)) || fail "bisect started over a bisect already in progress (got $status)"
+
+  echo "== every status a commit can produce maps to the right bisect verdict"
+  # Asserted on the probe directly rather than through a bisect: which commits git chooses
+  # to visit is its own business, so a skip may simply never happen in a given history. A
+  # check that only sometimes exercises the branch it guards is not a check.
+  probe() { # probe EXPECTED DESCRIPTION -- CMD...
+    local expected="$1" what="$2"
+    shift 2
+    local got=0
+    (cd "$repo" && tsh bisect-probe -l "$work/logs" "$@") >/dev/null 2>&1 || got=$?
+    ((got == expected)) || fail "a commit that $what should be $expected to git bisect, but the probe said $got"
+  }
+  probe 0 "builds and passes" -b true -- true
+  probe 1 "builds and fails" -b true -- false
+  probe 125 "does not build" -b false -- true
+  probe 125 "has no test runner (exit 127)" -- sh -c 'exit 127'
+  probe 125 "runs nothing while exiting 0" -- sh -c 'echo "collected 0 items"; exit 0'
+  # The command's own low numbers are its own: make exits 2 on any failure, and for a while
+  # the probe took 2 for "the harness could not run it" and skipped every failing commit
+  probe 1 "fails the way make does, with exit 2" -- sh -c 'exit 2'
+  probe 1 "fails with exit 3" -- sh -c 'exit 3'
+  probe 125 "has a runner that is not executable (exit 126)" -- sh -c 'exit 126'
+  probe 125 "cannot be run by the harness at all" -m no-such-set -- true
+  # 128+n means killed by a signal, and git bisect ABORTS on anything above 127 rather than
+  # treating it as a verdict. A crash is the code at this commit misbehaving, so it is
+  # clamped to "bad" and the session goes on; a person stopping the run is not evidence
+  # about the commit, so it is passed through and the session ends, which is what Ctrl-C
+  # is for.
+  probe 1 "is killed by a signal" -- sh -c 'kill -SEGV $$'
+  probe 130 "is interrupted by the user" -- sh -c 'kill -INT $$'
+  probe 143 "is terminated from outside" -- sh -c 'kill -TERM $$'
+
+  echo "== bisect refuses to start on a working tree it would trample"
+  # A TRACKED file has to change: `passes` is deleted at HEAD, so writing it would only add
+  # an untracked file, which `git diff --quiet` does not see. Written that way, this check
+  # held for a year on git's own refusal to check out over the untracked file, and t.sh's
+  # dirty-tree refusal was never exercised at all.
+  echo dirty >>"$repo/note"
+  status=0
+  (cd "$repo" && tsh bisect "$first_good" -- true) >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "bisect started with uncommitted changes in the tree (got $status)"
+  git -C "$repo" checkout -q -- . 2>/dev/null || :
+
+  echo "== falsify separates what the suite caught from what it never saw"
+  # A throwaway repository whose suite deliberately covers one guard and not the other, so
+  # every verdict falsify can reach is exercised on a known answer.
+  fal="$work/falsify-repo"
+  mkdir -p "$fal/tests"
+  cat >"$fal/impl.sh" <<'IMPL'
+#!/bin/sh
+clamp() { if [ "$1" -lt 0 ]; then echo 0; else echo "$1"; fi; }
+strip() { echo "$1" | tr -d ' '; }
+IMPL
+  cat >"$fal/suite.sh" <<'SUITE'
+#!/bin/sh
+. ./impl.sh
+[ "$(clamp -5)" = "0" ] || { echo "clamp let a negative through"; exit 1; }
+echo "1 passed"
+SUITE
+  cat >"$fal/tests/defects.sh" <<'DEFECTS'
+defect 'clamp/negative' 'impl.sh' \
+  'if [ "$1" -lt 0 ]' 'if false' \
+  'a negative reading is reported as-is instead of being clamped to zero'
+defect 'strip/spaces' 'impl.sh' \
+  "tr -d ' '" 'cat' \
+  'a name keeps the spaces that were supposed to be removed'
+defect 'gone/drifted' 'impl.sh' \
+  'a line that is not in the file' 'anything' \
+  'nothing: this entry exists to prove a drifted list says so'
+defect 'syntax/broken' 'impl.sh' \
+  'clamp() {' 'clamp() {{{' \
+  'nothing: this edit only breaks the syntax, which a parser notices and a test does not'
+DEFECTS
+  # The defects a replacement cannot express. A gate's planted defects append a bad line,
+  # create a file that should not be there, rewrite one whole and take one away, and a
+  # find-and-replace reaches none of those: there is nothing unique to find in a file that
+  # does not exist yet. Kept in their own list so the counts the checks above assert stay
+  # what they are.
+  cat >"$fal/tests/forms.sh" <<'FORMS'
+plant 'appended/clamp' 'impl.sh' append \
+  'clamp() { echo "$1"; }
+' \
+  'a later definition of clamp silently replaces the guarded one, and every reading is passed through unclamped'
+plant 'written/whole' 'impl.sh' write \
+  '#!/bin/sh
+clamp() { echo "$1"; }
+strip() { echo "$1" | tr -d " "; }
+' \
+  'the file is replaced whole by one that answers every call without clamping'
+plant 'removed/impl' 'impl.sh' rm \
+  'the file the suite sources is gone, and a suite that sources it without checking reports nothing'
+plant 'created/unread' 'extra.txt' create \
+  'nothing reads this
+' \
+  'a file nobody asked for appears in the tree and no check looks at it'
+FORMS
+  # Each new form's own way of going stale. Without one, a list keeps reporting caught
+  # while the edit it names has quietly stopped being an edit at all: text already in the
+  # file, a file already there, a file already gone.
+  cat >"$fal/tests/forms-stale.sh" <<'STALE'
+plant 'stale/appended' 'impl.sh' append \
+  '#!/bin/sh
+' \
+  'nothing: this entry exists to prove append says so when the text is already in the file'
+plant 'stale/created' 'impl.sh' create \
+  'x
+' \
+  'nothing: this entry exists to prove create says so when the file is already there'
+plant 'stale/removed' 'nosuch.txt' rm \
+  'nothing: this entry exists to prove rm says so when the file is not there'
+STALE
+  # A guard that only fails when two things go at once, which is the shape of defect a
+  # single edit cannot express: with either half still in place the suite stays green, so
+  # a run where the second edit silently did not land looks exactly like a caught defect.
+  # The delimiter is not MODE: tree-sitter ends a heredoc at any body line that opens with
+  # the delimiter word, and the body below opens with MODE
+  cat >"$fal/mode.sh" <<'MODE_FILE'
+#!/bin/sh
+MODE=safe
+MODE_FILE
+  printf 'limit=10\n' >"$fal/config.txt"
+  cat >"$fal/both.sh" <<'BOTH'
+#!/bin/sh
+. ./mode.sh
+. ./config.txt
+if [ "$MODE" = safe ] || [ "$limit" = 10 ]; then
+  echo "1 passed"
+else
+  echo "both guards gone"
+  exit 1
+fi
+BOTH
+  # Both halves in one file, which is where edits computed from the same original overwrite
+  # each other: the second write puts the pristine first half back, the suite stays green,
+  # and the entry is reported a survivor. Two files cannot show that — they are written to
+  # different paths — so the pair below is the case that catches it
+  cat >"$fal/pair.sh" <<'PAIR'
+#!/bin/sh
+FIRST=on
+SECOND=on
+PAIR
+  cat >"$fal/pair-suite.sh" <<'PAIRSUITE'
+#!/bin/sh
+. ./pair.sh
+if [ "$FIRST" = on ] || [ "$SECOND" = on ]; then
+  echo "1 passed"
+else
+  echo "both flags gone"
+  exit 1
+fi
+PAIRSUITE
+  cat >"$fal/tests/and.sh" <<'AND'
+defect 'both/guards' 'mode.sh' \
+  'MODE=safe' 'MODE=unsafe' \
+  'the safe default and the configured limit are both gone, and nothing is left to hold the value down' \
+  --and 'config.txt' 'limit=10' 'limit=99' \
+  expect caught 'both guards gone'
+AND
+  cat >"$fal/tests/and-one-file.sh" <<'ANDONE'
+defect 'pair/both' 'pair.sh' \
+  'FIRST=on' 'FIRST=off' \
+  'both flags that hold the behaviour up are gone at once, and nothing is left to notice' \
+  --and 'pair.sh' 'SECOND=on' 'SECOND=off' \
+  expect caught 'both flags gone'
+ANDONE
+  chmod +x "$fal/impl.sh" "$fal/suite.sh" "$fal/both.sh"
+  git -C "$fal" init -q -b master
+  git -C "$fal" config user.name check
+  git -C "$fal" config user.email check@example.invalid
+  git -C "$fal" add -A
+  git -C "$fal" commit -q -m "the fixture"
+  # A pristine copy to diff against byte for byte. Comparing `$(cat file)` with `$(cat file)`
+  # would pass a restore that dropped the trailing newline, because command substitution
+  # strips it from both sides — a check sharing the blind spot of the code it checks.
+  cp "$fal/impl.sh" "$work/impl.sh.pristine"
+
+  status=0
+  fal_out=$(cd "$fal" && tsh falsify -b 'sh -n impl.sh' -l "$work/logs" --out "$work/falsify.out" -- sh suite.sh 2>&1) || status=$?
+  ((status == 83)) || fail "falsify exited $status where a defect went unnoticed (want 83):"$'\n'"$fal_out"
+  grep -q '^caught    clamp/negative' <<<"$fal_out" ||
+    fail "falsify did not credit the suite for the guard it does cover:"$'\n'"$fal_out"
+  grep -q '^SURVIVED  strip/spaces' <<<"$fal_out" ||
+    fail "falsify did not report the guard nothing checks:"$'\n'"$fal_out"
+  # A survivor is only actionable next to the code it names
+  if ! grep -qF "impl.sh:3  - tr -d ' '" <<<"$fal_out" || ! grep -qF "impl.sh:3  + cat" <<<"$fal_out"; then
+    fail "falsify reported the survivor without saying where the edit is and what it was:"$'\n'"$fal_out"
+  fi
+  grep -q '^stale     gone/drifted' <<<"$fal_out" ||
+    fail "falsify guessed at a find text that no longer matches instead of reporting it stale:"$'\n'"$fal_out"
+  # The one the user has to be able to trust: an edit that only breaks the build is not
+  # evidence that any test noticed anything
+  grep -q '^unusable  syntax/broken' <<<"$fal_out" ||
+    fail "falsify credited the suite for an edit that merely stopped the code building:"$'\n'"$fal_out"
+  echo "== falsify leaves what it found where a diff and a grep can read it"
+  # One file of names per verdict, a log per defect, results.json for machines
+  fo="$work/falsify.out"
+  grep -qx 'clamp/negative' "$fo/caught.txt" || fail "falsify.out/caught.txt does not name the caught defect"
+  grep -qx 'strip/spaces' "$fo/survived.txt" || fail "falsify.out/survived.txt does not name the survivor"
+  grep -qx 'gone/drifted' "$fo/stale.txt" || fail "falsify.out/stale.txt does not name the stale entry"
+  grep -qx 'syntax/broken' "$fo/unusable.txt" || fail "falsify.out/unusable.txt does not name the unusable entry"
+  [[ -s "$fo/logs/clamp-negative.log" ]] || fail "falsify.out/logs has no log for clamp/negative"
+  [[ -s "$fo/logs/baseline.log" ]] || fail "falsify.out/logs has no log for the baseline run"
+  [[ "$(grep -c '"verdict": "survived"' "$fo/results.json")" == 1 ]] ||
+    fail "results.json does not carry exactly one survivor"
+  grep -q '"consequence": "a name keeps the spaces' "$fo/results.json" ||
+    fail "results.json does not carry the consequence sentence"
+  grep -q '"file": "impl.sh", "line": 3, "verdict": "survived"' "$fo/results.json" ||
+    fail "results.json does not carry the survivor's file and line"
+
+  echo "== falsify puts the source back byte for byte"
+  cmp -s "$fal/impl.sh" "$work/impl.sh.pristine" ||
+    fail "falsify did not restore impl.sh byte for byte"
+  git -C "$fal" diff --quiet || fail "falsify left the working tree dirty"
+
+  echo "== the exit code says which kind of not-caught ended the run"
+  # A weak suite (83), a list that drifted (87), an edit that only broke the build (88).
+  # Folded into one status, CI could not tell the tests being weak from the list having
+  # rotted. After the byte-for-byte check above, because these refuse on a dirty tree.
+  status=0
+  (cd "$fal" && tsh falsify -l "$work/logs" gone -- sh suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 87)) || fail "falsify exited $status on a list whose only defect is stale (want 87)"
+  status=0
+  (cd "$fal" && tsh falsify -b 'sh -n impl.sh' -l "$work/logs" syntax -- sh suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 88)) || fail "falsify exited $status on a list whose only defect breaks the build (want 88)"
+  status=0
+  (cd "$fal" && tsh falsify -l "$work/logs" clamp -- sh suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 0)) || fail "falsify exited $status on a list whose only defect is caught (want 0)"
+
+  echo "== a defect the find text cannot express: appended, written whole, created, removed"
+  # The four shapes a gate's planted defects actually take beside a replacement. Each has
+  # to reach a verdict of its own, and the tree has to come back: a created file removed
+  # again, a removed file put back, both byte for byte, or the next run measures a tree
+  # nobody meant to leave behind.
+  status=0
+  forms_out=$(cd "$fal" && tsh falsify -d tests/forms.sh -l "$work/logs" --out "$work/fo-forms" -- sh suite.sh 2>&1) || status=$?
+  ((status == 83)) || fail "falsify exited $status on a list of non-replacement defects with one survivor among them (want 83):"$'\n'"$forms_out"
+  grep -q '^caught    appended/clamp' <<<"$forms_out" ||
+    fail "falsify did not catch a defect appended to the end of the file:"$'\n'"$forms_out"
+  grep -q '^caught    written/whole' <<<"$forms_out" ||
+    fail "falsify did not catch a file rewritten whole:"$'\n'"$forms_out"
+  grep -q '^caught    removed/impl' <<<"$forms_out" ||
+    fail "falsify did not catch the file the suite sources being taken away:"$'\n'"$forms_out"
+  grep -q '^SURVIVED  created/unread' <<<"$forms_out" ||
+    fail "falsify did not report a created file nothing looks at as a survivor:"$'\n'"$forms_out"
+  [[ ! -e "$fal/extra.txt" ]] || fail "falsify left behind the file a create defect made"
+  cmp -s "$fal/impl.sh" "$work/impl.sh.pristine" ||
+    fail "falsify did not put impl.sh back byte for byte after the forms that rewrote and removed it"
+  git -C "$fal" diff --quiet || fail "falsify left the working tree dirty after the non-replacement forms"
+
+  echo "== each new form says when it has stopped being an edit at all"
+  # A replacement goes stale when its find text no longer matches once. The others need
+  # their own answer to the same question, or the list reports caught for an append that
+  # adds what is already there, a create of a file that exists, an rm of one that does not.
+  status=0
+  forms_stale_out=$(cd "$fal" && tsh falsify -d tests/forms-stale.sh -l "$work/logs" --out "$work/fo-forms-stale" -- sh suite.sh 2>&1) || status=$?
+  ((status == 87)) || fail "falsify exited $status on a list whose every non-replacement entry has drifted (want 87):"$'\n'"$forms_stale_out"
+  grep -q '^stale     stale/appended' <<<"$forms_stale_out" ||
+    fail "falsify appended text the file already carries instead of reporting it stale:"$'\n'"$forms_stale_out"
+  grep -q '^stale     stale/created' <<<"$forms_stale_out" ||
+    fail "falsify created a file that is already in the repository instead of reporting it stale:"$'\n'"$forms_stale_out"
+  grep -q '^stale     stale/removed' <<<"$forms_stale_out" ||
+    fail "falsify did not report an rm of a file that is not there as stale:"$'\n'"$forms_stale_out"
+
+  echo "== one defect, several edits: a guard that only fails when both halves go"
+  # Two edits under one name, because they are one logical defect: the harness's own
+  # `blind` plant is exactly this — without pipefail the status read after a pipe is still
+  # right whenever the first command is the one that failed, so planting either half alone
+  # proves nothing. The fixture's suite stays green under either edit by itself, so a run
+  # that applied only the first cannot be mistaken for a catch.
+  status=0
+  and_out=$(cd "$fal" && tsh falsify -d tests/and.sh -l "$work/logs" --out "$work/fo-and" -- sh both.sh 2>&1) || status=$?
+  ((status == 0)) || fail "falsify exited $status on a defect whose two edits are both needed (want 0):"$'\n'"$and_out"
+  grep -q '^caught    both/guards' <<<"$and_out" ||
+    fail "falsify did not apply both edits of one defect — with either alone the suite stays green:"$'\n'"$and_out"
+  cmp -s "$fal/config.txt" <(printf 'limit=10\n') ||
+    fail "falsify did not restore the second file of a multi-edit defect"
+  git -C "$fal" diff --quiet || fail "falsify left the working tree dirty after a defect with several edits"
+
+  # The same claim where both edits land in one file. Computed from the same original and
+  # written one after the other, the second would carry the first's pristine text back with
+  # it, leaving half the defect on disk and the suite green — a survivor that never was
+  status=0
+  and1_out=$(cd "$fal" && tsh falsify -d tests/and-one-file.sh -l "$work/logs" --out "$work/fo-and1" -- sh pair-suite.sh 2>&1) || status=$?
+  ((status == 0)) || fail "falsify exited $status on a defect whose two edits land in one file (want 0):"$'\n'"$and1_out"
+  grep -q '^caught    pair/both' <<<"$and1_out" ||
+    fail "falsify lost one of two edits aimed at the same file — the later write put the earlier one back:"$'\n'"$and1_out"
+  cmp -s "$fal/pair.sh" <(printf '#!/bin/sh\nFIRST=on\nSECOND=on\n') ||
+    fail "falsify did not restore a file both edits of one defect had touched"
+
+  echo "== falsify finds an entry's text in time proportional to the file, not to its square"
+  # A removal pattern — ${content#*"$find"} and ${content%%"$find"*} alike — costs the
+  # square of the file's length, under bash 3.2 and 5.3 both: sixteen times the time for
+  # four times the text, 27 s for %% on 495 KB under 3.2. The guard sits last, where that is
+  # at its worst, and it holds glob characters, so the text has to be found literally as
+  # well as quickly: read as a pattern, [*?] matches one character and the entry goes stale
+  big="$work/big-repo"
+  mkdir -p "$big/tests"
+  awk 'BEGIN { for (i = 0; i < 8000; i++) printf "filler_%05d=\"a line of ordinary text that only takes up room\"\n", i }' >"$big/big.sh"
+  printf 'guard[*?]=on\n' >>"$big/big.sh"
+  cat >"$big/tests/defects.sh" <<'BIG'
+defect 'big/guard' 'big.sh' \
+  'guard[*?]=on' 'guard[*?]=off' \
+  'the guard at the end of a large file is switched off'
+BIG
+  git -C "$big" init -q -b master
+  git -C "$big" config user.name check
+  git -C "$big" config user.email check@example.invalid
+  git -C "$big" add -A
+  git -C "$big" commit -q -m "a large file with one guard at its end"
+  big_kb=$(($(wc -c <"$big/big.sh") / 1024))
+  big_limit=10
+  # The limit is enforced rather than read afterwards. Waited out, a removal pattern takes
+  # minutes on this file — which is how the entry that plants one timed out in CI instead
+  # of being caught, and how a broken gate would spend those minutes before saying so.
+  # KILL rather than TERM: bash runs a trap only between commands, and a removal on this
+  # file is one expansion that lasts a minute, so TERM would wait that minute out — measured
+  # at 111 s for the entry that plants one. KILL cannot be held, and what it leaves
+  # half-edited is the throwaway fixture under $work. t.sh itself is the background
+  # process, not a subshell around it, or the signal would end the subshell and leave t.sh
+  # running
+  big_started=$SECONDS
+  cd -- "$big"
+  "$BASH" "$HERE/t.sh" falsify -l "$work/logs" --out "$work/fo-big" -- sh -c 'grep -qF "guard[*?]=on" big.sh && echo "1 passed"' >"$work/big.out" 2>&1 &
+  big_pid=$!
+  cd -- "$HERE"
+  while kill -0 "$big_pid" 2>/dev/null && ((SECONDS - big_started < big_limit)); do sleep 1; done
+  if kill -0 "$big_pid" 2>/dev/null; then
+    kill -KILL "$big_pid" 2>/dev/null || :
+    wait "$big_pid" 2>/dev/null || :
+    fail "falsify was still over one entry in a ${big_kb} KB file after ${big_limit} s — finding its text costs the square of the file's length"
+  fi
+  status=0
+  wait "$big_pid" || status=$?
+  big_out=$(cat "$work/big.out")
+  ((status == 0)) || fail "falsify exited $status on one catchable entry in a ${big_kb} KB file (want 0):"$'\n'"$big_out"
+  grep -q '^caught    big/guard' <<<"$big_out" ||
+    fail "falsify did not find a find text holding glob characters literally:"$'\n'"$big_out"
+
+  echo "== --since narrows the list to the files a change touched, and says so when that is nothing"
+  # In a clone, so the fixture's history stays what the checks above and below expect
+  since_repo="$work/since-repo"
+  git clone -q "$fal" "$since_repo"
+  git -C "$since_repo" config user.name check
+  git -C "$since_repo" config user.email check@example.invalid
+  echo note >"$since_repo/note.txt"
+  git -C "$since_repo" add note.txt && git -C "$since_repo" commit -q -m "a note, no code"
+  status=0
+  since_out=$(cd "$since_repo" && tsh falsify --since HEAD~1 -l "$work/logs" --out "$work/fo-since" -- sh suite.sh 2>&1) || status=$?
+  ((status == 0)) || fail "falsify --since exited $status where no defect names a changed file (want 0):"$'\n'"$since_out"
+  grep -q '^nothing to falsify' <<<"$since_out" || fail "falsify --since ran nothing and did not say so:"$'\n'"$since_out"
+  printf '# touched\n' >>"$since_repo/impl.sh"
+  git -C "$since_repo" add impl.sh && git -C "$since_repo" commit -q -m "impl.sh changed"
+  status=0
+  since_out=$(cd "$since_repo" && tsh falsify --since HEAD~1 -l "$work/logs" --out "$work/fo-since" -- sh suite.sh 2>&1) || status=$?
+  ((status == 83)) || fail "falsify --since exited $status where impl.sh changed and its survivor should run (want 83):"$'\n'"$since_out"
+  grep -q '^SURVIVED  strip/spaces' <<<"$since_out" || fail "falsify --since skipped a defect in the changed file:"$'\n'"$since_out"
+  status=0
+  (cd "$since_repo" && tsh falsify --since no-such-ref -l "$work/logs" --out "$work/fo-since" -- sh suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "falsify accepted --since with a ref that does not exist (got $status)"
+
+  echo "== --shard splits the list between checkouts, losing nothing and running nothing twice"
+  # The whole claim of sharding is a partition: the union of the shards is the list, and no
+  # defect is in two of them. Asserted over several widths, and one wider than the list,
+  # because an off-by-one in the offset or the stride shows at some N and not at others —
+  # with two shards a stride of 1 loses nothing, it just runs everything twice.
+  shard_want="clamp/negative gone/drifted strip/spaces syntax/broken"
+  for n in 1 2 3 5; do
+    shard_seen=""
+    for i in $(seq 1 "$n"); do
+      (cd "$fal" && tsh falsify --shard "$i/$n" -l "$work/logs" --out "$work/fo-shard-$n-$i" -- sh suite.sh) >/dev/null 2>&1 || :
+      # The names files rather than the report: that is the interface a CI job reads, and
+      # parsing the prose would make this a test of the wording
+      # A shard the matrix is too wide for writes no verdict file at all, and under errexit
+      # an unguarded cat or grep in an assignment kills the gate without a word
+      shard_seen="$shard_seen$(cat "$work/fo-shard-$n-$i"/*.txt 2>/dev/null || :)"$'\n'
+    done
+    shard_seen=$(grep -v '^$' <<<"$shard_seen" | sort || :)
+    shard_twice=$(uniq -d <<<"$shard_seen" | tr '\n' ' ')
+    [[ -z "${shard_twice// /}" ]] ||
+      fail "--shard over $n shards ran a defect in more than one of them: $shard_twice"
+    [[ "$(uniq <<<"$shard_seen" | tr '\n' ' ')" == "$shard_want " ]] ||
+      fail "--shard over $n shards covered [$(uniq <<<"$shard_seen" | tr '\n' ' ')] and not the whole list [$shard_want]"
+  done
+  for bad in 0/2 3/2 abc 1/0; do
+    status=0
+    (cd "$fal" && tsh falsify --shard "$bad" -l "$work/logs" --out "$work/fo-shard-bad" -- sh suite.sh) >/dev/null 2>&1 || status=$?
+    ((status == 64)) || fail "falsify accepted --shard $bad (got $status)"
+  done
+
+  echo "== --worktree falsifies a checkout of HEAD and leaves the tree in front of you alone"
+  # The suite prints where it runs, so the log can show it was not the fixture's tree
+  status=0
+  wt_out=$(cd "$fal" && tsh falsify --worktree -l "$work/logs" --out "$work/fo-wt" -- sh -c 'pwd; sh suite.sh' 2>&1) || status=$?
+  ((status == 83)) || fail "falsify --worktree exited $status (want 83, the survivor is still there):"$'\n'"$wt_out"
+  grep -q '^SURVIVED  strip/spaces' <<<"$wt_out" || fail "falsify --worktree lost the survivor:"$'\n'"$wt_out"
+  suite_ran_in=$(head -1 "$work/fo-wt/logs/strip-spaces.log")
+  [[ -n "$suite_ran_in" && "$suite_ran_in" != "$fal" ]] ||
+    fail "falsify --worktree ran the suite in the fixture's own tree ($suite_ran_in), not in a worktree"
+  [[ "$(git -C "$fal" worktree list | wc -l)" -eq 1 ]] || fail "falsify --worktree left a worktree behind"
+  git -C "$fal" diff --quiet || fail "falsify --worktree touched the tree in front of you"
+  [[ ! -e "$fal/FALSIFY-IN-PROGRESS" ]] || fail "falsify --worktree put its in-flight marker in the tree in front of you"
+  [[ ! -e "$work/fo-wt/in-flight" ]] || fail "falsify left its in-flight marker after finishing"
+
+  echo "== on a GitHub runner a finding is also an annotation on the file and line"
+  # A finding next to the code is read by whoever is about to merge it; in a log, by
+  # whoever opens the log. The variable is cleared for the negative, because the gate
+  # itself runs on such a runner.
+  status=0
+  gh_out=$(cd "$fal" && GITHUB_ACTIONS=true tsh falsify -b 'sh -n impl.sh' -l "$work/logs" --out "$work/fo-gh" -- sh suite.sh 2>&1) || status=$?
+  grep -qF '::error file=impl.sh,line=3,title=falsify::SURVIVED strip/spaces: a name keeps the spaces' <<<"$gh_out" ||
+    fail "falsify on a GitHub runner did not annotate the survivor:"$'\n'"$gh_out"
+  grep -qF '::warning file=impl.sh,title=falsify::stale gone/drifted' <<<"$gh_out" ||
+    fail "falsify on a GitHub runner did not annotate the stale entry:"$'\n'"$gh_out"
+  grep -qF '::warning file=impl.sh,line=2,title=falsify::unusable syntax/broken' <<<"$gh_out" ||
+    fail "falsify on a GitHub runner did not annotate the unusable entry:"$'\n'"$gh_out"
+  status=0
+  plain_out=$(cd "$fal" && GITHUB_ACTIONS='' tsh falsify -b 'sh -n impl.sh' -l "$work/logs" --out "$work/fo-gh" -- sh suite.sh 2>&1) || status=$?
+  ! grep -q '^::' <<<"$plain_out" || fail "falsify printed GitHub annotations off a GitHub runner"
+
+  echo "== a defect that never lets the suite finish is timed out, not caught"
+  # A neutered guard is often a loop that no longer ends. Without a deadline it hung the
+  # whole falsification; credited as caught it would reward the suite for a hang.
+  printf "defect 'clamp/hang' 'impl.sh' 'echo 0; else' 'while :; do sleep 1; done; else' 'a hang'\n" >"$fal/tests/hang.sh"
+  # Under a watchdog of its own, because the thing being checked is that falsify does not
+  # hang, and a check that hangs when it fails is not a check. Job control, so the group
+  # can be ended if it comes to that.
+  set -m
+  (cd "$fal" && exec "$BASH" "$HERE/t.sh" falsify -d tests/hang.sh --timeout 1 -l "$work/logs" -- sh suite.sh) \
+    >"$work/hang.out" 2>&1 &
+  hang_pid=$!
+  set +m
+  hang_waited=0
+  while kill -0 "$hang_pid" 2>/dev/null && ((hang_waited < 200)); do
+    sleep 0.1
+    hang_waited=$((hang_waited + 1))
+  done
+  if kill -0 "$hang_pid" 2>/dev/null; then
+    kill -TERM -- -"$hang_pid" 2>/dev/null || :
+    sleep 1
+    kill -KILL -- -"$hang_pid" 2>/dev/null || :
+    wait "$hang_pid" 2>/dev/null || :
+    git -C "$fal" checkout -q -- . 2>/dev/null || :
+    fail "a defect that hangs the suite hangs falsify with it, twenty seconds and counting — nothing timed it out"
+  fi
+  status=0
+  wait "$hang_pid" || status=$?
+  fal_out=$(cat "$work/hang.out")
+  ((status == 84)) || fail "falsify exited $status on a defect that hangs the suite (want 84):"$'\n'"$fal_out"
+  grep -q '^TIMEDOUT  clamp/hang' <<<"$fal_out" || fail "falsify did not report the hanging defect as timed out:"$'\n'"$fal_out"
+  cmp -s "$fal/impl.sh" "$work/impl.sh.pristine" || fail "falsify did not put impl.sh back after a timeout"
+  status=0
+  (cd "$fal" && tsh falsify --timeout abc -l "$work/logs" -- sh suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "falsify accepted --timeout abc (got $status)"
+
+  echo "== an interrupted falsify dies interrupted, with the source put back"
+  # A trap that only restored and returned let the loop carry on: Ctrl-C stopped nothing,
+  # the interrupted defect vanished from the report, and the summary still counted it
+  printf '#!/bin/sh\nsleep 1\nsh suite.sh\n' >"$fal/slow.sh"
+  git -C "$fal" add slow.sh && git -C "$fal" commit -q -m "a slow suite"
+  # exec, so the PID below is t.sh's own and the signal reaches the trap being tested; and
+  # under job control, because without it a script's background jobs IGNORE SIGINT, an
+  # ignored signal cannot be trapped, and this check would find nothing to interrupt
+  flight="$fal/falsify.out/in-flight"
+  rm -f "$flight"
+  # The deadline names the watchdog's sleep, so the check after the interrupt can look for
+  # it, and carries this gate's PID, so a gate running beside this one on the same machine
+  # never finds the other's
+  orphan_deadline=$((100000 + $$))
+  set -m
+  (cd "$fal" && exec "$BASH" "$HERE/t.sh" falsify --timeout "$orphan_deadline" -l "$work/logs" -- sh slow.sh) >"$work/interrupted.out" 2>&1 &
+  falsify_pid=$!
+  set +m
+  # Waits for the mutant itself. Neither a fixed sleep nor the in-flight marker puts one
+  # there first, and PITFALLS.md measured what each of those cost under "The behaviour
+  # half survives heavy concurrency"
+  waited=0
+  while cmp -s "$fal/impl.sh" "$work/impl.sh.pristine" && kill -0 "$falsify_pid" 2>/dev/null && ((waited < 400)); do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  ! cmp -s "$fal/impl.sh" "$work/impl.sh.pristine" ||
+    fail "falsify never put a mutant on disk — the interrupt below would have had nothing to land on"
+  [[ -s "$flight" ]] ||
+    fail "a mutant is on disk and falsify did not name the defect in flight"
+  # And for the watchdog, which is started after the mutant is written: an interrupt that
+  # lands between the two leaves no watchdog to orphan, and the check for one below passed
+  # against a trap that never ended it. pgrep -fx is in procps, BSD and busybox alike
+  waited=0
+  while ! pgrep -fx "sleep $orphan_deadline" >/dev/null && kill -0 "$falsify_pid" 2>/dev/null && ((waited < 400)); do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  pgrep -fx "sleep $orphan_deadline" >/dev/null ||
+    fail "falsify ran a mutant with no watchdog asleep beside it — the interrupt below would have had none to end"
+  kill -INT "$falsify_pid"
+  status=0
+  wait "$falsify_pid" || status=$?
+  ((status >= 128)) || fail "falsify carried on after an interrupt (got $status):"$'\n'"$(cat "$work/interrupted.out")"
+  ! grep -q 'defect(s)' "$work/interrupted.out" || fail "an interrupted falsify still printed its summary"
+  cmp -s "$fal/impl.sh" "$work/impl.sh.pristine" || fail "an interrupted falsify did not put impl.sh back"
+  git -C "$fal" diff --quiet || fail "an interrupted falsify left the working tree dirty"
+  # The watchdog is a process group of its own, which the interrupt does not reach. Left
+  # behind, it wakes at the deadline and sends TERM to a process group id that by then may
+  # belong to something else. A second, because a killed process leaves the table a moment
+  # after the signal rather than at it
+  orphan_waited=0
+  while pgrep -fx "sleep $orphan_deadline" >/dev/null && ((orphan_waited < 20)); do
+    sleep 0.1
+    orphan_waited=$((orphan_waited + 1))
+  done
+  if pgrep -fx "sleep $orphan_deadline" >/dev/null; then
+    # Ended here before failing, or it outlives the gate and does what it is failed for.
+    # The watchdog shell first, which a fork leaves with t.sh's arguments, so it never
+    # reaches its TERM; then its sleep. The pattern is in no argument of this gate's own,
+    # or pkill -f would end the gate with it
+    pkill -KILL -f "falsify --timeout $orphan_deadline " || :
+    pkill -KILL -fx "sleep $orphan_deadline" || :
+    fail "an interrupted falsify left its watchdog asleep, to wake at the deadline and signal a process group that is no longer its own"
+  fi
+
+  echo "== a mutant that could not be written is not a survivor"
+  # A write that fails leaves the pristine code in place; the suite passes against it, and
+  # that used to be reported as SURVIVED for a guard the suite does cover. git tracks only
+  # the executable bit, so the read-only file still counts as a clean tree.
+  if [[ $EUID -eq 0 ]]; then
+    echo "   skipped: running as root, which can write a read-only file"
+  else
+    chmod a-w "$fal/impl.sh"
+    status=0
+    fal_out=$(cd "$fal" && tsh falsify -l "$work/logs" -- sh suite.sh 2>&1) || status=$?
+    chmod u+w "$fal/impl.sh"
+    ((status == 70)) || fail "falsify measured a mutant it could not write (got $status):"$'\n'"$fal_out"
+    ! grep -q 'SURVIVED' <<<"$fal_out" || fail "falsify credited a read-only source file with a survivor"
+  fi
+
+  echo "== falsify refuses the situations where its answer would be meaningless"
+  status=0
+  (cd "$fal" && tsh falsify -l "$work/logs" -- sh -c 'exit 1') >/dev/null 2>&1 || status=$?
+  ((status == 85)) || fail "falsify measured against an already-failing suite (got $status, want 85)"
+  status=0
+  (cd "$fal" && tsh falsify -l "$work/logs" -- sh -c 'echo "collected 0 items"; exit 0') \
+    >/dev/null 2>&1 || status=$?
+  ((status == 85)) || fail "falsify measured against a suite that never really ran (got $status, want 85)"
+  echo dirt >"$fal/impl.sh.tmp" && mv "$fal/impl.sh.tmp" "$fal/impl.sh"
+  status=0
+  (cd "$fal" && tsh falsify -l "$work/logs" -- sh suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "falsify started on a dirty tree, where an interrupted restore looks like your own edits (got $status)"
+  git -C "$fal" checkout -q -- .
+  status=0
+  : >"$fal/tests/empty.sh"
+  (cd "$fal" && tsh falsify -d tests/empty.sh -l "$work/logs" -- sh suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "falsify accepted an empty defect list, which proves nothing (got $status)"
+  # A defect declared as one nothing can catch is expected to survive, and no finding;
+  # the day the suite catches it, the declaration is stale
+  printf "defect 'strip/spaces' 'impl.sh' \"tr -d ' '\" 'cat' 'spaces stay' expect survived 'no caller strips yet'\n" >"$fal/tests/expected.sh"
+  status=0
+  fal_out=$(cd "$fal" && tsh falsify -d tests/expected.sh -l "$work/logs" --out "$work/fo3" -- sh suite.sh 2>&1) || status=$?
+  ((status == 0)) || fail "a defect declared as expected to survive was reported as a survivor (got $status):"$'\n'"$fal_out"
+  grep -q '^expected  strip/spaces: no caller strips yet' <<<"$fal_out" || fail "falsify did not report the expected survivor as expected:"$'\n'"$fal_out"
+  grep -qx 'strip/spaces' "$work/fo3/expected.txt" || fail "falsify.out/expected.txt does not name the expected survivor"
+  printf "defect 'clamp/negative' 'impl.sh' 'if [ \"\$1\" -lt 0 ]' 'if false' 'negatives leak' expect survived 'wrong'\n" >"$fal/tests/expected-wrong.sh"
+  status=0
+  fal_out=$(cd "$fal" && tsh falsify -d tests/expected-wrong.sh -l "$work/logs" --out "$work/fo3" -- sh suite.sh 2>&1) || status=$?
+  ((status == 87)) || fail "a declaration the suite disproved was not reported stale (got $status, want 87):"$'\n'"$fal_out"
+  grep -q '^stale     clamp/negative: declared as one nothing can catch' <<<"$fal_out" || fail "falsify did not say the expectation was disproved:"$'\n'"$fal_out"
+  printf "defect 'x/y' 'impl.sh' 'a' 'b' 'c' expect exploded 'z'\n" >"$fal/tests/expected-bad.sh"
+  status=0
+  (cd "$fal" && tsh falsify -d tests/expected-bad.sh -l "$work/logs" --out "$work/fo3" -- sh suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "falsify accepted an expectation it has no meaning for (got $status)"
+  # `expect caught FRAGMENT` holds a caught to more than the suite having gone red: the
+  # run's own output has to name the guard the entry is about. The fixture's suite prints
+  # a distinct line per assertion, so an entry naming the wrong one is caught by something
+  # else — which is the shape a flaky test failing through a whole run produces
+  printf "defect 'clamp/negative' 'impl.sh' 'if [ \"\$1\" -lt 0 ]' 'if false' 'negatives leak' expect caught 'clamp let a negative through'\n" >"$fal/tests/expected-by.sh"
+  status=0
+  fal_out=$(cd "$fal" && tsh falsify -d tests/expected-by.sh -l "$work/logs" --out "$work/fo3" -- sh suite.sh 2>&1) || status=$?
+  ((status == 0)) || fail "a defect caught by the guard it names was not reported caught (got $status):"$'\n'"$fal_out"
+  grep -q '^caught    clamp/negative' <<<"$fal_out" || fail "falsify did not report the named guard as the catcher:"$'\n'"$fal_out"
+  printf "defect 'clamp/negative' 'impl.sh' 'if [ \"\$1\" -lt 0 ]' 'if false' 'negatives leak' expect caught 'a message this suite never prints'\n" >"$fal/tests/expected-by-wrong.sh"
+  status=0
+  fal_out=$(cd "$fal" && tsh falsify -d tests/expected-by-wrong.sh -l "$work/logs" --out "$work/fo3" -- sh suite.sh 2>&1) || status=$?
+  ((status == 87)) || fail "a defect caught by something other than the guard it names was still called caught (got $status, want 87):"$'\n'"$fal_out"
+  grep -q '^stale     clamp/negative: the suite went red, but nothing in its output mentions' <<<"$fal_out" ||
+    fail "falsify did not say the run credited the defect to a guard that did not catch it:"$'\n'"$fal_out"
+  # The template is the thing people copy, so every form it shows has to parse: falsify
+  # must get as far as the files it names, which this fixture does not have
+  status=0
+  tpl_out=$(cd "$fal" && tsh falsify -d "$HERE/templates/defects.sh" -l "$work/logs" -- sh suite.sh 2>&1) || status=$?
+  ((status == 64)) || fail "templates/defects.sh is not a list falsify accepts (got $status):"$'\n'"$tpl_out"
+  grep -q 'which cannot be read' <<<"$tpl_out" ||
+    fail "templates/defects.sh was refused before its entries were read:"$'\n'"$tpl_out"
+  grep -q "expect survived '" templates/defects.sh || fail "templates/defects.sh shows no declared exception"
+  # A defect in a test file is "caught" by whatever it breaks and reads as coverage
+  printf 'helper=1\n' >"$fal/tests/helper.sh"
+  git -C "$fal" add tests/helper.sh && git -C "$fal" commit -q -m "a helper under tests/"
+  printf "defect 'helper/edited' 'tests/helper.sh' 'helper=1' 'helper=2' 'nothing'\n" >"$fal/tests/in-tests.sh"
+  status=0
+  (cd "$fal" && tsh falsify -d tests/in-tests.sh -l "$work/logs" --out "$work/fo2" -- sh suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "falsify accepted a defect aimed at a test file (got $status)"
+  status=0
+  (cd "$fal" && tsh falsify -d tests/in-tests.sh --any-file -l "$work/logs" --out "$work/fo2" -- sh suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 83)) || fail "falsify with --any-file did not run the defect in the test file (got $status, want 83)"
+  # Its own findings directory ignores itself, as the logs do
+  (cd "$fal" && tsh falsify -d tests/in-tests.sh --any-file -l "$work/logs" -- sh suite.sh) >/dev/null 2>&1 || :
+  [[ -z "$(git -C "$fal" status --porcelain --untracked-files=all -- falsify.out)" ]] ||
+    fail "falsify's own falsify.out shows up in git status"
+  # A test file outside the usual shapes, which the policy names as one, is refused the same
+  # way. Judged by the message: before the policy knew the key, an unknown key refused with
+  # the same 64, which would pass for this check without the check being made
+  printf 'probe=1\n' >"$fal/rootprobe.sh"
+  git -C "$fal" add rootprobe.sh && git -C "$fal" commit -q -m "a check at the root"
+  printf "defect 'root/edited' 'rootprobe.sh' 'probe=1' 'probe=2' 'nothing'\n" >"$work/root-defects.sh"
+  printf 'tests rootprobe.sh\n' >"$work/rootprobe.conf"
+  status=0
+  root_out=$(cd "$fal" && T_CONFIG="$work/rootprobe.conf" tsh falsify -d "$work/root-defects.sh" -l "$work/logs" --out "$work/fo4" -- sh suite.sh 2>&1) || status=$?
+  { ((status == 64)) && grep -q 'which looks like a test' <<<"$root_out"; } ||
+    fail "falsify ran a defect in a file the policy names a test (got $status):"$'\n'"$root_out"
+  # A falsify --worktree that stops before the first defect, on a red baseline, takes its
+  # worktree with it. The traps run once the function has returned, when its locals are gone,
+  # so a worktree known only to a local was left behind with an unbound-variable error
+  status=0
+  wt_out=$(cd "$fal" && T_CONFIG='' tsh falsify --worktree -d "$work/root-defects.sh" -l "$work/logs" --out "$work/fo5" -- sh -c 'exit 1' 2>&1) || status=$?
+  ((status == 85)) || fail "falsify on a red baseline exited $status (want 85):"$'\n'"$wt_out"
+  [[ "$(git -C "$fal" worktree list | wc -l)" -eq 1 ]] ||
+    fail "falsify --worktree left its worktree behind after a red baseline"
+  if grep -q 'unbound variable' <<<"$wt_out"; then
+    fail "falsify tripped over its own variables on the way out:"$'\n'"$wt_out"
+  fi
+
+  echo "== prove takes the fix out of a commit and requires its tests to go red"
+  # A clone, with commits of every shape prove has to tell apart: a test that pins its
+  # fix, a test that does not, a fix without which nothing builds, a commit with no fix
+  prove_repo="$work/prove-repo"
+  git clone -q "$fal" "$prove_repo"
+  git -C "$prove_repo" config user.name check
+  git -C "$prove_repo" config user.email check@example.invalid
+  pcommit() { # pcommit MESSAGE
+    git -C "$prove_repo" add -A
+    git -C "$prove_repo" commit -q -m "$1"
+  }
+  # The suite has to live where prove can tell it from the code: under tests/
+  mkdir -p "$prove_repo/tests"
+  git -C "$prove_repo" mv suite.sh tests/suite.sh
+  pcommit "the suite moves under tests/"
+  # (a) a test that pins its fix
+  # shellcheck disable=SC2016  # the $1 belongs to the fixture's own sh
+  printf 'double() { echo $(( $1 * 2 )); }\n' >>"$prove_repo/impl.sh"
+  # shellcheck disable=SC2016  # the $(...) belongs to the fixture's own sh
+  printf '[ "$(double 2)" = "4" ] || { echo "double is wrong"; exit 1; }\n' >>"$prove_repo/tests/suite.sh"
+  pcommit "double, with a test that pins it"
+  pinned=$(git -C "$prove_repo" rev-parse HEAD)
+  status=0
+  prove_out=$(cd "$prove_repo" && tsh prove -l "$work/logs" -- sh tests/suite.sh 2>&1) || status=$?
+  ((status == 0)) || fail "prove exited $status on a commit whose test pins its fix (want proven, 0):"$'\n'"$prove_out"
+  grep -q '^proven:' <<<"$prove_out" || fail "prove did not say the commit was proven:"$'\n'"$prove_out"
+  git -C "$prove_repo" diff --quiet || fail "prove left the fix taken away"
+  # (b) a test that does not pin its fix
+  # shellcheck disable=SC2016  # the $1 belongs to the fixture's own sh
+  printf 'triple() { echo $(( $1 * 3 )); }\n' >>"$prove_repo/impl.sh"
+  printf 'echo "also fine"\n' >>"$prove_repo/tests/suite.sh"
+  pcommit "triple, with a test that asserts nothing about it"
+  status=0
+  prove_out=$(cd "$prove_repo" && tsh prove -l "$work/logs" -- sh tests/suite.sh 2>&1) || status=$?
+  ((status == 83)) || fail "prove exited $status on a commit whose test does not pin its fix (want VACUOUS, 83):"$'\n'"$prove_out"
+  grep -q '^VACUOUS:' <<<"$prove_out" || fail "prove did not call the vacuous commit vacuous:"$'\n'"$prove_out"
+  git -C "$prove_repo" diff --quiet || fail "prove left the vacuous fix taken away"
+  # (c) a fix without which nothing builds: the commit adds the file the build checks
+  # shellcheck disable=SC2016  # the $1 belongs to the fixture's own sh
+  printf '#!/bin/sh\nquad() { echo $(( $1 * 4 )); }\n' >"$prove_repo/impl2.sh"
+  # shellcheck disable=SC2016  # the $(...) belongs to the fixture's own sh
+  printf '. ./impl2.sh\n[ "$(quad 2)" = "8" ] || { echo "quad is wrong"; exit 1; }\n' >>"$prove_repo/tests/suite.sh"
+  pcommit "quad, in a new file"
+  status=0
+  prove_out=$(cd "$prove_repo" && tsh prove -b 'sh -n impl2.sh' -l "$work/logs" -- sh tests/suite.sh 2>&1) || status=$?
+  ((status == 88)) || fail "prove exited $status where taking the fix away breaks the build (want 88):"$'\n'"$prove_out"
+  [[ -f "$prove_repo/impl2.sh" ]] || fail "prove did not put back the file the commit added"
+  [[ -z "$(git -C "$prove_repo" status --porcelain)" ]] || fail "prove left the tree dirty after removing and restoring a new file"
+  # (d) a commit with no fix in it
+  printf 'helper=2\n' >"$prove_repo/tests/helper.sh"
+  pcommit "only a test file"
+  status=0
+  (cd "$prove_repo" && tsh prove -l "$work/logs" -- sh tests/suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "prove accepted a commit with no fix to take away (got $status)"
+  # (e) a commit that is not HEAD is proven in a worktree, and the tree in front of you stays
+  status=0
+  prove_out=$(cd "$prove_repo" && tsh prove "$pinned" -l "$work/logs" -- sh tests/suite.sh 2>&1) || status=$?
+  ((status == 0)) || fail "prove exited $status on an older commit whose test pins its fix (want 0):"$'\n'"$prove_out"
+  [[ "$(git -C "$prove_repo" worktree list | wc -l)" -eq 1 ]] || fail "prove left a worktree behind"
+  [[ -z "$(git -C "$prove_repo" status --porcelain)" ]] || fail "prove of an older commit touched the tree in front of you"
+  status=0
+  (cd "$prove_repo" && tsh prove no-such-ref -l "$work/logs" -- sh tests/suite.sh) >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "prove accepted a ref that does not exist (got $status)"
+  # (f) a suite kept at the root, as some repositories keep their gate: without the policy
+  # prove takes it for code and takes its new check away with the fix, and the policy's
+  # `tests` keeps it, so only the fix goes
+  printf '. ./impl.sh\necho "rootcheck ran"\n' >"$prove_repo/rootcheck.sh"
+  pcommit "a suite at the root"
+  # shellcheck disable=SC2016  # the $1 belongs to the fixture's own sh
+  printf 'half() { echo $(( $1 / 2 )); }\n' >>"$prove_repo/impl.sh"
+  # shellcheck disable=SC2016  # the $(...) belongs to the fixture's own sh
+  printf '[ "$(half 8)" = "4" ] || { echo "half is wrong"; exit 1; }\n' >>"$prove_repo/rootcheck.sh"
+  pcommit "half, pinned by the suite at the root"
+  printf 'tests rootcheck.sh\n' >"$work/rootcheck.conf"
+  status=0
+  prove_out=$(cd "$prove_repo" && T_CONFIG='' tsh prove -l "$work/logs" -- sh rootcheck.sh 2>&1) || status=$?
+  ((status == 83)) || fail "prove with no policy exited $status on a root-level suite (want VACUOUS, 83):"$'\n'"$prove_out"
+  status=0
+  prove_out=$(cd "$prove_repo" && T_CONFIG="$work/rootcheck.conf" tsh prove -l "$work/logs" -- sh rootcheck.sh 2>&1) || status=$?
+  ((status == 0)) || fail "prove exited $status on a fix the policy's tests pin (want proven, 0):"$'\n'"$prove_out"
+  # (g) a commit whose suite is red with its fix in place, proven from a later HEAD: prove
+  # refuses, and the worktree it made for that commit goes with it
+  printf 'third=3\n' >>"$prove_repo/impl.sh"
+  printf 'exit 1\n' >>"$prove_repo/tests/suite.sh"
+  pcommit "a fix whose suite is red"
+  red=$(git -C "$prove_repo" rev-parse HEAD)
+  git -C "$prove_repo" show HEAD~1:tests/suite.sh >"$prove_repo/tests/suite.sh"
+  pcommit "the suite green again"
+  status=0
+  prove_out=$(cd "$prove_repo" && T_CONFIG='' tsh prove "$red" -l "$work/logs" -- sh tests/suite.sh 2>&1) || status=$?
+  ((status == 85)) || fail "prove on a commit whose suite is red exited $status (want 85):"$'\n'"$prove_out"
+  [[ "$(git -C "$prove_repo" worktree list | wc -l)" -eq 1 ]] ||
+    fail "prove left behind the worktree of a commit whose suite is red"
+  if grep -q 'unbound variable' <<<"$prove_out"; then
+    fail "prove tripped over its own variables on the way out:"$'\n'"$prove_out"
+  fi
+
+  echo "== the help is complete: every subcommand, every flag, every variable, every exit code"
+  # The help is hand-written text and the parsers are code, and the two drift the moment
+  # a flag is added to one and not the other. The check-sh.sh from
+  # https://github.com/rokokol/bash-best-practices-skill, vendored, reads the truth out of
+  # the code — the dispatcher's subcommands, each
+  # parser's flags, the T_ variables the script reads, the literal codes it returns — and
+  # requires each to be in the help, then holds every `t.sh …` the docs mention to the
+  # dispatcher. It plants its own defects on the first call below and is spared that on the
+  # other two with CHECK_SH_NESTED=1: the copy and the tools it runs with are the same for
+  # all three, so proving it again would prove nothing new. A nested copy of this gate is
+  # spared it on the first call too: the self-test plants into the checker's own template,
+  # never into this repository, so a copy with a defect planted here would prove again what
+  # the run that made the copy proved, 5 s more each time. What stays here is what it does
+  # not read: the verdict band returned from functions rather than exited, and whether
+  # help refuses a topic it does not have. Every reference is held backwards as well, with
+  # -m, which asks no list of it: a renamed subcommand cannot leave a ghost in one, and a
+  # reference added later is covered by the glob rather than by a list kept here
+  ref_docs=()
+  for f in references/*.md references/ecosystems/*.md; do ref_docs+=(-m "$f"); done
+  CHECK_SH_NESTED=${T_CHECK_NESTED:-} checker -n t.sh -e T_ -m SKILL.md -d README.md "${ref_docs[@]}" t.sh
+  # The drift checker runs against the upstream probe as well: it takes flags and answers
+  # --help, so its help can fall behind its parser the same way t.sh's can
+  CHECK_SH_NESTED=1 checker -n upstream.sh tests/upstream.sh
+  # The gate itself, for its parse and its bash 3.2 claim: it has no dispatcher and no
+  # flags, so the checker reads it by the proxy alone
+  CHECK_SH_NESTED=1 checker -n check.sh check.sh
+  # The defect lists are sourced by falsify under whatever bash runs t.sh, and a heredoc
+  # inside $( ) reads as other text under 3.2 with no error, so the lists carry the claim
+  # and the proxy holds them to it; on a macOS runner the parse is the real 3.2 one
+  CHECK_SH_NESTED=1 checker -n defects.sh tests/defects.sh
+  CHECK_SH_NESTED=1 checker -n defects.sh templates/defects.sh
+  codes_help=$(tsh help codes)
+  codes=0
+  while IFS= read -r code; do
+    codes=$((codes + 1))
+    grep -qE "^  $code  " <<<"$codes_help" || fail "t.sh exits $code but 't.sh help codes' never lists it"
+  done < <(grep -oE '(return|exit) (6[4-9]|7[0-9]|8[0-9])( |$)' t.sh | awk '{print $2}' | sort -u)
+  ((codes >= 6)) || fail "only $codes exit code(s) could be read out of t.sh — the extractor is broken"
+  status=0
+  tsh help wat >/dev/null 2>&1 || status=$?
+  ((status == 64)) || fail "t.sh help accepted a topic it does not have (got $status)"
+}
+
+# The steps below prove the checks above can fail, by breaking one thing at a time in a
+# throwaway copy. T_CHECK_NESTED stops the copy from recursing into this same section.
+check_proofs() {
+  # The gate must refuse a mode it does not have, or a typo would run nothing and pass
+  ! "$BASH" ./check.sh wat >/dev/null 2>&1 || fail "the gate accepted a mode it does not have"
+
+  copy() {
+    local dest="$1"
+    # Everything git tracks and nothing else, so the list cannot drift from the repository
+    # the way a hand-written one did with every new file. Untracked files that are not
+    # ignored come along too: a check being written must be provable before it is
+    # committed, and `git archive` would only carry HEAD.
+    # cp rather than tar: `tar --null -T -` is GNU and bsdtar, and the busybox tar a
+    # bash-3.2 container brings along has neither
+    local f
+    git ls-files -z --cached --others --exclude-standard | while IFS= read -r -d '' f; do
+      mkdir -p "$dest/$(dirname "$f")"
+      cp -p "$f" "$dest/$f"
+    done
+  }
+  # A copy is run for the half its defect belongs to, not for the mode this run was given.
+  # A lint defect proven by a behaviour run is proven by whatever that half happened to do,
+  # and under `all` every copy was paying for both halves: 93% of a ten-minute gate was the
+  # copies, and half of that was the half the defect had nothing to do with.
+  nested() { (cd "$1" && T_CHECK_NESTED=1 "$BASH" ./check.sh "${2:-$mode}" >/dev/null 2>&1); }
+
+  # A planted defect must make the copy fail FOR ITS OWN REASON. Asserting only that the
+  # copy failed lets one broken check take credit for another's proof — which is how the
+  # duplicate-marker rule sat here unproven, its copy failing on the dead-entry rule
+  # instead.
+  catches() { # catches DIR EXPECTED-FRAGMENT DESCRIPTION HALF
+    local dir="$1" want="$2" what="$3" half="$4" out
+    # stderr only: every refusal goes there, and the family's gates print their own
+    # "all clear" lines to stdout under the same check-skill:/check-pins: prefix
+    out=$( (cd "$dir" && T_CHECK_NESTED=1 "$BASH" ./check.sh "$half" 2>&1 >/dev/null) || :)
+    local line
+    line=$(grep -m 1 -E '^check(-skill|-pins|-sh)?:' <<<"$out" || :)
+    [[ -n "$line" ]] || fail "$what: the copy did not fail at all"
+    [[ "$line" == *"$want"* ]] ||
+      fail "$what: the copy failed for another reason — $line"
+  }
+
+  echo "== an untouched copy passes, so a copy that fails below fails for its defect"
+  # The question every falsification rests on and the one easiest to forget: if a pristine
+  # copy already fails, then "the broken copy failed" says nothing, and every proof below is
+  # vacuous while the gate stays green. This repository shipped exactly that bug for four
+  # commits, after a step was added that a copy could not satisfy.
+  copy "$work/pristine"
+  # The copy has to be complete, or a copy that fails below could be failing on the gap
+  while IFS= read -r tracked; do
+    [[ -e "$work/pristine/$tracked" ]] || fail "the copy step lost $tracked"
+  done < <(git ls-files --cached --others --exclude-standard)
+  nested "$work/pristine" ||
+    fail "an untouched copy does not pass the gate — every 'able to fail' proof below would be meaningless"
+
+  # One planted defect per line. HALF is the half of the gate the defect belongs to, lint
+  # or behaviour, and the row is skipped when that half is not being run. FRAGMENT is the
+  # text the copy's own failure must carry, and the mutator says how the defect is planted:
+  #   append FILE TEXT          add TEXT to the end of FILE
+  #   write  FILE TEXT          replace FILE with TEXT
+  #   sed    FILE SCRIPT MARK   run SCRIPT over FILE; MARK must be in the result
+  #   awk    FILE PROGRAM MARK  the same, with awk
+  #   drop   FILE TEXT          delete every line holding TEXT; none may remain
+  #   rm     FILE               delete FILE
+  # A mutation that did not land is a failure of its own, never a silent pass: a sed whose
+  # pattern drifted from t.sh would otherwise leave a pristine copy, and the pristine copy
+  # passes, which reads exactly like a defect that was caught.
+  planted=0
+  skipped=0
+  rows=0
+  rows_dir="$work/rows"
+  mkdir -p "$rows_dir"
+  : >"$rows_dir/names"
+  # The rows are written down here and run below, in parallel. They are independent by
+  # construction — a copy each, its own defect, its own verdict — and running them one at a
+  # time was almost the whole gate: 94 percent of it, and it grows with every proof added.
+  plant() { # plant HALF NAME FRAGMENT DESCRIPTION MUTATOR FILE ARGS...
+    local half="$1" name="$2"
+    [[ "$mode" == all || "$mode" == "$half" ]] || return 0
+    # Two rows with one name would share a copy, and the second would inherit the first's
+    # defect on top of its own — which is how a proof once failed for another's reason. The
+    # names file rather than the directory, because no directory exists until the row runs
+    ! grep -qxF -- "$name" "$rows_dir/names" ||
+      fail "plant: the name '$name' is used by two rows"
+    printf '%s\n' "$name" >>"$rows_dir/names"
+    rows=$((rows + 1))
+    local a
+    for a in "$@"; do printf '%s\0' "$a"; done >"$(printf '%s/row-%04d' "$rows_dir" "$rows")"
+  }
+
+  # A row whose defect root cannot produce: root writes wherever it likes, so a copy that
+  # takes a write away proves nothing there. Counted rather than silently left out, so the
+  # floor below is held to exactly what ran plus exactly what was skipped
+  plant_unless_root() { # plant_unless_root PLANT-ARGS...
+    [[ "$mode" == all || "$mode" == "$1" ]] || return 0
+    if [[ $EUID -eq 0 ]]; then
+      echo "   skipped as root: $4"
+      skipped=$((skipped + 1))
+    else
+      plant "$@"
+    fi
+  }
+
+  plant_run() { # plant_run HALF NAME FRAGMENT DESCRIPTION MUTATOR FILE ARGS...
+    local half="$1" name="$2" want="$3" what="$4" how="$5" file="$6"
+    shift 6
+    local dir="$work/plant-$name"
+    copy "$dir"
+    mutate "$dir" "$what" "$how" "$file" "$@"
+    catches "$dir" "$want" "$what" "$half"
+  }
+
+  # One mutation, and then any more introduced by --and. Two rows needed two files edited —
+  # a duplicate marker has to be in the set's own fixture too, or the copy fails on the
+  # dead-entry rule first — and they were hand-written blocks outside the table for it,
+  # which kept them out of the parallel pool and out of the count the table is held to.
+  mutate() { # mutate DIR DESCRIPTION HOW FILE ARGS... [--and HOW FILE ARGS...]
+    local dir="$1" what="$2" how="$3" file="$4"
+    shift 4
+    local -a args=()
+    while (($#)); do
+      [[ "$1" != --and ]] || break
+      args+=("$1")
+      shift
+    done
+    case "$how" in
+      append) printf '%s' "${args[0]}" >>"$dir/$file" ;;
+      write) printf '%s' "${args[0]}" >"$dir/$file" ;;
+      sed)
+        sed "${args[0]}" "$dir/$file" >"$dir/$file.new" && mv "$dir/$file.new" "$dir/$file"
+        grep -qF -- "${args[1]}" "$dir/$file" || fail "$what: the defect was not planted — '${args[1]}' is not in $file"
+        ;;
+      awk)
+        awk "${args[0]}" "$dir/$file" >"$dir/$file.new" && mv "$dir/$file.new" "$dir/$file"
+        grep -qF -- "${args[1]}" "$dir/$file" || fail "$what: the defect was not planted — '${args[1]}' is not in $file"
+        ;;
+      drop)
+        grep -vF -- "${args[0]}" "$dir/$file" >"$dir/$file.new" && mv "$dir/$file.new" "$dir/$file"
+        ! grep -qF -- "${args[0]}" "$dir/$file" || fail "$what: the defect was not planted — '${args[0]}' is still in $file"
+        ;;
+      rm) rm -f "$dir/$file" ;;
+      *) fail "plant: no such mutator '$how'" ;;
+    esac
+    [[ ! -x "$file" || ! -e "$dir/$file" ]] || chmod +x "$dir/$file"
+    # Whatever came after --and is another mutation of the same copy
+    ((${#@} == 0)) || {
+      shift
+      mutate "$dir" "$what" "$@"
+    }
+  }
+
+  # The description of a row, for the line the parent prints in table order
+  row_what() { # row_what FILE
+    local a n=0
+    while IFS= read -r -d '' a; do
+      n=$((n + 1))
+      ((n != 4)) || {
+        printf '%s' "$a"
+        return 0
+      }
+    done <"$1"
+    fail "a planted row has no description — the row file is malformed"
+  }
+
+  run_rows() {
+    # An empty table is a legal state now rather than a lost one: most of the rows are
+    # entries in tests/defects.sh, and under `behaviour` the only ones left here are the
+    # bash-3.2 pair, which nothing but a macOS runner plants. Said out loud rather than
+    # passed in silence, because a table that ran nothing reads exactly like a table where
+    # everything was caught
+    if ((rows == 0)); then
+      echo "   nothing is planted here for mode '$mode' — its defects are in tests/defects.sh, run by t.sh falsify"
+      return 0
+    fi
+    # One job per core. `nproc` is GNU, `sysctl` is the BSD on a macOS runner, and neither is
+    # worth failing over: a serial run is slow, not wrong.
+    local width
+    width=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    [[ "$width" =~ ^[0-9]+$ ]] && ((width > 0)) || width=4
+    local i=0 batch f k st
+    local -a pids=() idx=()
+    # Job control, because without it the probes below report 0 and prove nothing. What a
+    # background job does to SIGINT, and what the copies were asserting while it did, is in
+    # PITFALLS.md under "Backgrounding the gate needs `set -m`"
+    set -m
+    while ((i < rows)); do
+      pids=()
+      idx=()
+      batch=0
+      while ((batch < width && i < rows)); do
+        i=$((i + 1))
+        f=$(printf '%s/row-%04d' "$rows_dir" "$i")
+        # Each row keeps its own stdout, stderr and status: `fail` inside a background
+        # subshell ends that subshell and nothing else, so a refusal nobody writes down is
+        # a refusal lost, and the run would go green on a proof that never proved anything
+        (
+          args=()
+          while IFS= read -r -d '' a; do args+=("$a"); done <"$f"
+          plant_run "${args[@]}"
+        ) >"$f.out" 2>"$f.err" &
+        pids+=("$!")
+        idx+=("$i")
+        batch=$((batch + 1))
+      done
+      # Waited on by pid rather than with a bare `wait`, which returns nothing about which
+      # job failed — and a status not read is a failure not seen
+      for k in "${!pids[@]}"; do
+        st=0
+        wait "${pids[$k]}" || st=$?
+        printf '%s\n' "$st" >"$(printf '%s/row-%04d.status' "$rows_dir" "${idx[$k]}")"
+      done
+    done
+    set +m
+    local failures=0
+    for ((i = 1; i <= rows; i++)); do
+      f=$(printf '%s/row-%04d' "$rows_dir" "$i")
+      echo "== able to fail: $(row_what "$f")"
+      # No status file at all means the job never reported, which is not a pass
+      [[ -f "$f.status" ]] || fail "$(row_what "$f"): the copy never reported a status"
+      if [[ "$(cat "$f.status")" == 0 ]]; then
+        planted=$((planted + 1))
+      else
+        failures=$((failures + 1))
+        cat "$f.err" >&2
+      fi
+    done
+    ((failures == 0)) ||
+      fail "$failures planted defect(s) did not prove what they were written for — their refusals are above"
+  }
+
+  # Six rows, where there were seventy-one. The rest are entries in tests/defects.sh now,
+  # run by `t.sh falsify` after a merge rather than by a copy-per-defect on every pull
+  # request. What stays is what a defect list cannot hold: noisy-awk edits check.sh, which
+  # is the suite, and a defect in the suite is "caught" by the suite falling over, which
+  # says nothing about what it checks; dupe, noisy-elsewhere and no-healthy-run edit
+  # fixtures under tests/, which falsify refuses because an edit there is caught by
+  # whatever it breaks, and --any-file would excuse them together with every other entry;
+  # and the bash4 pair is planted only where CHECK_BASH32 says the interpreter is the 3.2 a
+  # macOS runner has, which a list has no way to say.
+  # shellcheck disable=SC2016  # every $ below is t.sh's own source being matched, not an expansion
+  {
+    # The escape goes back into flags_of's own program. Nothing about the answer changes —
+    # gawk, mawk, busybox awk, goawk and the one-true-awk macOS ships all read `\ ` as a
+    # space — so the only thing to catch is the warning, which is the point: this is the
+    # gate proving it reads its own stderr rather than scrolling past it
+    plant lint noisy-awk "writes to stderr" "an awk program that warns while the gate stays green" \
+      sed check.sh 's/( \*\\| \*/(\\ *\\|\\ */' '(\ *\|\ *'
+    # Two files each: the duplicate has to be in the set's own lying fixture too, or the
+    # copy fails on the dead-entry rule first and the duplicate rule is never reached —
+    # which is exactly how this proof once passed without proving anything
+    plant lint dupe "repeats a marker that markers/default.txt" "a set repeating a default marker" \
+      append markers/go.txt $'No Tests Ran in 0.01s\n' \
+      --and append tests/fixtures/lying/go.log $'No Tests Ran in 0.01s\n'
+    # A default marker quiet on the pytest run and loud on the ctest one: the rule has to
+    # look at every ecosystem's healthy run, not the one it happened to start with
+    plant lint noisy-elsewhere "fires on tests/fixtures/clean/cpp.log" "a default marker that fires on another ecosystem's healthy run" \
+      append markers/default.txt $'Total Test time\n' \
+      --and append tests/fixtures/lying/default.log $'Total Test time (real) =   0.00 sec\n'
+    plant lint no-healthy-run "has no healthy run at" "a marker set with no healthy run to stay quiet on" \
+      rm tests/fixtures/clean/go.log
+  }
+
+  # t.sh travels to repositories that run CI on macOS, which ships bash 3.2, and that is
+  # the one place it has broken before. A grep for bash-4 syntax was the guard once; a grep
+  # is a proxy, matching the constructs somebody thought to list, and it let nine through
+  # on its first audit. The mechanism is this: the behaviour half under the real 3.2, on a
+  # macOS runner, with two constructs planted that only a 3.2 rejects. Under a newer bash
+  # they are no defect at all, so this block runs only where CHECK_BASH32 says which
+  # bash this is, and first checks that claim.
+  if [[ -n "${CHECK_BASH32:-}" ]]; then
+    echo "== this bash is the 3.2 the proof is about"
+    ((BASH_VERSINFO[0] == 3)) ||
+      fail "CHECK_BASH32 is set, but this is bash $BASH_VERSION — on macOS, run: /bin/bash ./check.sh behaviour"
+    ! "$BASH" -c 'declare -A m' >/dev/null 2>&1 || fail "CHECK_BASH32 is set, but this bash accepts declare -A"
+    plant behaviour bash4-declare "(got 70)" "a harness that declares an associative array" \
+      awk t.sh '{ print } /^set -uo pipefail$/ { print "declare -A t_sh_probe || exit 70" }' 'declare -A t_sh_probe'
+    # mapfile is not found, the marker list stays empty, and run refuses every command —
+    # the class of regression this bash was found unable to run
+    # shellcheck disable=SC2016  # t.sh's own source text is being matched, not expanded
+    plant behaviour bash4-mapfile "expected 79, got 64" "a harness reading its markers with mapfile" \
+      sed t.sh 's/^    while IFS= read -r line; do MARKER_PATTERNS+=("\$line"); done < <(read_markers "\$file")$/    mapfile -t MARKER_PATTERNS < <(read_markers "$file")/' 'mapfile -t MARKER_PATTERNS'
+  fi
+
+  # Every row of the table is written down by now; this is where they run
+  run_rows
+
+  # The table above is the proof; a table that lost its rows would prove nothing while
+  # the gate stayed green. The count is per half, so a half cannot borrow the other's rows.
+  # A floor and not an equality, because the bash-3.2 block adds two rows where it runs;
+  # but a floor left behind by rows added since is slack, and slack is how a lost row goes
+  # unnoticed. These are the counts with that block skipped, and the rows root cannot prove
+  # count as rows here, since each was named and skipped rather than lost.
+}
+
+case "$mode" in
+  lint) check_lint ;;
+  behaviour) check_behaviour ;;
+  all)
+    check_lint
+    check_behaviour
+    ;;
+esac
+[[ -n "${T_CHECK_NESTED:-}" ]] || check_proofs
+
+echo
+echo "check: everything holds"
