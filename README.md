@@ -22,6 +22,8 @@
 | [`.claude/skills/`](.claude/skills/) | локальные навыки для реверса, тестов и работы с проектом             |
 | [`.claude/memory/`](.claude/memory/) | общая память проекта с находками                                     |
 
+![ATTACK HIERATCHY](иерархия_атак.png)
+
 ## Ghidra и ReVa
 
 Проектные настройки MCP для Claude Code и opencode подключаются к серверу ReVa по адресу `http://localhost:8080/mcp/message`. Для работы инструментов нужно запустить Ghidra с ReVa; адрес подключения задан в [`.mcp.json`](.mcp.json) и [`opencode.json`](opencode.json)
