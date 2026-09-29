@@ -45,17 +45,15 @@ def test_generator_matches_scalar():
 
 
 def test_solve_recovers_and_is_sound():
-    # Top-byte-only intersection has a hard floor of about 2**24 / N survivors
-    # (that is why the seed is recovered as an equivalence class, not a point).
-    # With N large the set is small and enumerable; the truth always survives and
-    # every survivor is consistent.
+    # The low 24 bits bound how far the seed can move in either direction.
     for _ in range(5):
         x = random.randrange(1 << 32)
         offs = [random.randrange(1 << 32) for _ in range(4000)]
         cons = [(((x + off) & MASK) >> 24, off) for off in offs]
-        sol = R._solve(cons, limit=200000)
-        assert sol is not None and x in sol               # truth survives
-        assert len(sol) < 20000                            # floor ~ 2**24/4000
+        low_bytes = [(x + off) & 0xFFFFFF for off in offs]
+        expected = {(x + shift) & MASK for shift in range(-min(low_bytes), 0xFFFFFF - max(low_bytes) + 1)}
+        sol = R._solve(cons, limit=1 << 24)
+        assert sol is not None and set(sol) == expected
         for cand in random.sample(sol, min(len(sol), 200)):
             assert all((((cand + off) & MASK) >> 24) == kb for kb, off in cons)
     # monotone shrink: more constraints never enlarge the survivor set.

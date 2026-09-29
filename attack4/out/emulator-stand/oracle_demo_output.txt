@@ -1,10 +1,2 @@
-Тайминг-оракул на настоящей прошивке (CWE-208): node oracle_demo.mjs backup_full.bin <code>
-Счёт вызовов sleep_ms(50) на 4-м нажатии = число совпавших ведущих цифр k; 50*k мс = think-time.
-
-code 0952 vs 3952: true k=0 | observed sleep_ms(50) calls=0 | think-time frozen=0.0ms (=50*0)
-code 3052 vs 3952: true k=1 | observed sleep_ms(50) calls=1 | think-time frozen=50.0ms (=50*1)
-code 3902 vs 3952: true k=2 | observed sleep_ms(50) calls=2 | think-time frozen=100.0ms (=50*2)
-code 3951 vs 3952: true k=3 | observed sleep_ms(50) calls=3 | think-time frozen=150.0ms (=50*3)
-code 3952 vs 3952: true k=4 | observed sleep_ms(50) calls=4 | think-time frozen=200.0ms (=50*4)
-
-Лесенка 0/50/100/150/200 мс -> утечка длины совпавшего префикса -> PIN за <=40 попыток вместо 10^4.
+code 3952 vs 3952: expected prefix=4 | observed sleep_ms(50) calls=4 | frozen=200.0ms | unlock flag=1
+[PASS] firmware response matches the PIN reference

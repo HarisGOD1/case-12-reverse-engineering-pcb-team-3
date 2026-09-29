@@ -66,4 +66,4 @@ MTOOLS_SKIP_CHECK=1 mdir -i /tmp/storage_decrypted.img ::/
 
 - При запуске на [`artifacts/backup_full.bin`](../artifacts/backup_full.bin) PoC выдаёт начало загрузочного сектора `EB 3C 90 4D 53 44 4F 53 35 2E 30`, сигнатуру `55 AA` и образ объёмом 720 896 байт; полный сохранённый протокол — [`demo_output.txt`](out/demo_output.txt)
 - `file` распознаёт FAT12, а `mdir` показывает в корне `your_prize.zip`; [`artifacts/prepare.py`](../artifacts/prepare.py) извлекает архив и проверяет CRC и совпадение с [`artifacts/your_prize.zip`](../artifacts/your_prize.zip)
-- `python3 -m unittest discover -s attack1 -p 'test_*.py' -v` проверяет загрузочный сектор реального дампа и отбрасывает усечённый образ
+- `python3 -m unittest discover -s attack1/src -p 'test_*.py' -v` проверяет загрузочный сектор реального дампа и отбрасывает усечённый образ

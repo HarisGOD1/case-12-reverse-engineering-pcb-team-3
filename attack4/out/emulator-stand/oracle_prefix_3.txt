@@ -1,0 +1,2 @@
+code 3951 vs 3952: expected prefix=3 | observed sleep_ms(50) calls=3 | frozen=150.0ms | unlock flag=0
+[PASS] firmware response matches the PIN reference

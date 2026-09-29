@@ -178,7 +178,7 @@ def recover(ct):
              boot-sector known-plaintext + the always-reserved sectors.
     Stage 2: from a tentative decrypt, add every sector that came out all-zero
              (free/unused FAT and root space) as extra keystream, narrowing seed.
-    Stage 3: pick the unique seed whose volume yields a CRC-valid ZIP.
+    Stage 3: return the first seed with a CRC-valid ZIP; equivalent seeds remain.
     """
     nsec = len(ct) // SEC
     ct_arr = np.frombuffer(ct, dtype=np.uint8)
@@ -198,7 +198,7 @@ def recover(ct):
             zero_lbas = [L for L in range(nsec)
                          if not p0[L * SEC:(L + 1) * SEC].any()]
             seeds = _solve(_seed_constraints(ct, B, W, A, zero_lbas)) or seeds
-            # stage 3: CRC-valid ZIP is the decisive discriminator.
+            # A valid ZIP rejects incorrect pages but cannot distinguish equivalent seeds.
             for seed in seeds:
                 if volume_has_valid_zip(decrypt_np(ct_arr, args, seed).tobytes()):
                     return (A, seed, B, W)

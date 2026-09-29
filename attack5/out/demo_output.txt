@@ -1,37 +1,37 @@
-=== attack5: модель USB-ответа за границей хранилища ===
-диск (MSC)      : 2048 секторов = 1024 КиБ (граница param_2 < 0x800 в 0x10000354)
-хранилище       : 704 КиБ = 1408 секторов (LBA 0..1407)
+=== attack5: modeled USB reads beyond storage ===
+MSC disk        : 2048 sectors = 1024 KiB (param_2 < 0x800 at 0x10000354)
+storage         : 704 KiB = 1408 sectors (LBA 0..1407)
 
-[1] первый полностью стёртый сектор флеша: LBA 1403 (0x57b)
-    граница выделенной области: LBA 1408; LBA 1403..1407 стёрты, но ещё ВНУТРИ неё
-    вне области и внутри MSC: LBA 1408..2047
+[1] first fully erased flash sector: LBA 1403 (0x57b)
+    storage boundary: LBA 1408; LBA 1403..1407 are erased but still within storage
+    beyond storage but within MSC: LBA 1408..2047
 
-[2] сравнение обслуживаемых данных (flash XOR гамма):
-  LBA 1402 (0x57a): внутри хранилища
+[2] comparison of served data (flash XOR keystream):
+  LBA 1402 (0x57a): within storage
     flash : 3c a2 00 e6 47 25 8b 69 cf ac 12 f0 56 37 95 7b
-    served: 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d  entropy=1.645 бит/байт
-  LBA 1403 (0x57b): стёрт, но ВНУТРИ области
+    served: 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d 3d  entropy=1.645 bits/byte
+  LBA 1403 (0x57b): erased but within storage
     flash : ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
-    served: c6 27 89 eb 4d ae 10 72 d4 36 97 f9 5b bd 1e 80  entropy=7.253 бит/байт
-  LBA 1408 (0x580): вне области -> УТЕЧКА (~гамма)
+    served: c6 27 89 eb 4d ae 10 72 d4 36 97 f9 5b bd 1e 80  entropy=7.253 bits/byte
+  LBA 1408 (0x580): beyond storage -> keystream leak (~keystream)
     flash : ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
-    served: aa 0b 6d cf 31 92 f4 56 b8 1a 7b dd 3f a1 03 64  entropy=7.203 бит/байт
-  LBA 1508 (0x5e4): вне области -> УТЕЧКА (~гамма)
+    served: aa 0b 6d cf 31 92 f4 56 b8 1a 7b dd 3f a1 03 64  entropy=7.203 bits/byte
+  LBA 1508 (0x5e4): beyond storage -> keystream leak (~keystream)
     flash : ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
-    served: 7b dd 3e a0 02 64 c5 27 89 eb 4d ae 10 72 d4 36  entropy=7.252 бит/байт
-  LBA 2047 (0x7ff): вне области, но не стёрт
+    served: 7b dd 3e a0 02 64 c5 27 89 eb 4d ae 10 72 d4 36  entropy=7.252 bits/byte
+  LBA 2047 (0x7ff): beyond storage, not erased
     flash : 15 b3 52 f0 8e 2c ca 69 07 a5 43 e2 80 1e bc 5a
-    served: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  entropy=0.000 бит/байт
+    served: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  entropy=0.000 bits/byte
 
-[3] проверка модели на всех секторах за границей:
-    OK — 639 стёртых секторов за границей отдаются ровно как ~гамма
-    исключения (1 шт: [2047]...) — не стёрты, а содержат зашифрованные нули (артефакт записи образа): served там = 0x00, в оракул не годятся
-    доступно 327168 байт гаммы по модели USB-чтения
+[3] validate the model on every sector beyond storage:
+    OK: 639 erased sectors beyond storage return exactly ~keystream
+    exceptions (1: [2047]...): not erased; they contain encrypted zeros from the source image; served bytes are 0x00 and cannot feed the oracle
+    327168 keystream bytes available from modeled USB reads
 
-[4] восстановление только из USB-наблюдений (публичный словарь attack3):
-    B=0x41C64E6D W=0x9E3779B1 A=0x38C9CDA0 seed=0x9E37A9E1 (представитель класса)
+[4] recover from USB observations only (attack3 public dictionary):
+    B=0x41C64E6D W=0x9E3779B1 A=0x38C9CDA0 seed=0x9E37A9E1 (equivalent representative)
 
-[5] независимая проверка на зашифрованном томе из дампа:
-    сектор 0 -> eb 3c 90 4d 53 44 4f 53 35 2e 30 ...  OEM=b'MSDOS5.0'  boot sig=55 aa
-    валидный FAT12 boot: True;  CRC-валидный ZIP: True
-    OK — параметры восстановлены без шифротекста; том подтвердил экстраполяцию
+[5] independent check against the encrypted volume in the dump:
+    sector 0 -> eb 3c 90 4d 53 44 4f 53 35 2e 30 ...  OEM=b'MSDOS5.0'  boot sig=55 aa
+    valid FAT12 boot: True;  CRC-valid ZIP: True
+    OK: recovered parameters without ciphertext; the volume confirms extrapolation

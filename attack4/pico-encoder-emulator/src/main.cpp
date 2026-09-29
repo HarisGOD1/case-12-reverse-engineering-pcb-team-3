@@ -24,8 +24,8 @@
 //   Pico GP5 (SENSE)  -> a target output LED (input; for readiness/unlock sense)
 //   DO NOT tie the two boards' 3V3 / VBUS together. Ground + the signal lines only.
 //
-// DRIVE MODEL: open-drain. We only pull a line LOW or release it to high-Z (the
-// target's pull-up restores HIGH). We never source a HIGH.
+// DRIVE MODEL: pull a line LOW or release it with INPUT_PULLUP. The Pico pull-up
+// sources a weak HIGH; the output driver never drives HIGH.
 //
 // CONTROL: 115200-baud USB serial, single-char commands. See printHelp().
 // ---------------------------------------------------------------------------
@@ -51,10 +51,7 @@ static bool INVERT_DIR = false;
 static const int RESET_DIGIT = 0;
 
 // ------------------------------- Timing ------------------------------------
-// One place for every delay. "Grarmar" of the timing lives here so the readiness
-// function (next step) can key off these. All milliseconds.
-// TODO(next): replace the fixed step delay with an adaptive one that keys off the
-// target's response on SENSE instead of a constant.
+// Timing values remain adjustable because the target groups nearby encoder edges.
 static uint32_t EDGE_MS = 5;	 // between quadrature edges inside one detent (tight burst)
 static uint32_t DETENT_MS = 100; // gap after each detent; > the safe's 80 ms detent-group window
 								 // so each detent is finalized as exactly one step (no merge/split)
@@ -63,8 +60,7 @@ static uint32_t RELEASE_MS = 60; // button released before the next action
 static uint32_t DIGIT_GAP_MS = 80; // between confirmed digits
 
 // ------------------------------- Sense (opt) -------------------------------
-static bool SENSE_ENABLE = false;	  // watch PIN_SENSE
-static int SENSE_ACTIVE_LEVEL = HIGH; // level that means "unlocked" (once wired right)
+static bool SENSE_ENABLE = false;	  // console status only; the oracle reads GP5 directly
 
 // ----------------------------- Oracle (CWE-208) ----------------------------
 // The safe leaks the matched-prefix length as think-time. On the 4th button
@@ -79,8 +75,8 @@ static int SENSE_ACTIVE_LEVEL = HIGH; // level that means "unlocked" (once wired
 // threshold is live-tunable and 't<code>' prints the raw edge trace for calibration.
 static uint32_t ORACLE_BASE_US = 0;		 // fixed offset added to the measured freeze ('B<ms>')
 static uint32_t ORACLE_STEP_US = 50000;	 // think-time per matching digit, ~sleep_ms(50) ('S<ms>')
-static uint32_t ORACLE_GUARD_US = 3000;	 // ignore SENSE edges this early (press glitch) ('Q<ms>')
-static uint32_t ORACLE_DECIDE_US = 320000; // quiet + high past this freeze => unlock, k=4 ('D<ms>')
+static uint32_t ORACLE_GUARD_US = 3000;	 // stored by Q; not used by measureThinkTime
+static uint32_t ORACLE_DECIDE_US = 320000; // stored by D; not used by measureThinkTime
 static uint32_t ORACLE_WINDOW_US = 900000; // hard cap on one measurement ('W<ms>')
 static uint32_t ATTEMPT_GAP_MS = 1500;	 // wait out the reject animation before the next try ('A<ms>')
 
@@ -238,12 +234,12 @@ static void senseMonitor(long seconds)
 // Result of watching SENSE across one 4th-press compare.
 struct Meas
 {
-	bool unlocked;	   // SENSE latched high and quiet -> the safe opened (k == 4)
+	bool unlocked;	   // matched-prefix timing indicates k >= 4
 	bool valid;		   // false only on a quiet-low window (SENSE likely mis-tapped)
 	int k;			   // matched-prefix length 0..4
 	uint32_t freezeUs; // measured think-time (first usable edge, or decide point)
 	uint32_t edges;	   // usable edges seen (>= guard); reject animation gives many
-	uint32_t tailUs;   // quiet time after the last edge (large + high => unlock)
+	uint32_t tailUs;   // reserved field; current measurement does not use it
 	int finalLevel;	   // SENSE level at the end of the window
 };
 
@@ -454,11 +450,11 @@ static void printHelp()
 	Serial.println(F("Entry:"));
 	Serial.println(F("  n<pin> enter a 4-digit code (e.g. n3952)   k  enter known PIN 3952"));
 	Serial.println(F("Sense:"));
-	Serial.println(F("  e  toggle SENSE    m<sec> monitor SENSE edges (find the right LED)"));
+	Serial.println(F("  e  toggle SENSE status (oracle reads GP5 regardless)   m<sec> monitor edges"));
 	Serial.println(F("Oracle (timing attack, needs SENSE on target GPIO10):"));
 	Serial.println(F("  t<code> measure think-time of one code (t0000 => k=0, t3952 => k=4)"));
 	Serial.println(F("  o  run oracle: recover PIN digit-by-digit (<=40 tries)  s/x aborts"));
-	Serial.println(F("  B<ms> base   S<ms> step   Q<ms> guard   D<ms> unlock-decide"));
+	Serial.println(F("  B<ms> base   S<ms> step   Q<ms>/D<ms> stored only; no measurement effect"));
 	Serial.println(F("  W<ms> window   A<ms> gap between attempts"));
 	Serial.println(F("Misc:   I  release all lines (high-Z)   ?  status    h  this help"));
 }
@@ -672,7 +668,7 @@ static void handleChar(int c)
 	case 'I':
 		idleLines();
 		g_believed = RESET_DIGIT;
-		Serial.println(F("[idle] all lines released to high-Z (pulled up)"));
+		Serial.println(F("[idle] all output drivers off; input pull-ups enabled"));
 		break;
 	case '?':
 		printStatus();

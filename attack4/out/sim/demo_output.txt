@@ -1,5 +1,3 @@
-Прогон со-симулятора attack4 (без железа): python3 emulator_sim.py
-
 [ok]   control logic dials the intended PIN with matching calibration
 [ok]   wrong calibration (invert / no-reset) does NOT unlock -- flags bench needs
 [ok]   dumb sweep bounded by 10^4

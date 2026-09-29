@@ -113,7 +113,7 @@ def main(argv):
         return 2
     data = Path(argv[1]).read_bytes()
     if len(data) != 0x200000:
-        print("[FAIL] ожидается полный дамп флеша размером 2 МиБ")
+        print("[FAIL] expected a complete 2 MiB flash dump")
         return 2
 
     outside_start = STORAGE_LEN // SECTOR
@@ -124,10 +124,10 @@ def main(argv):
         except ValueError as error:
             print(f"[FAIL] {error}")
             return 2
-    print("=== attack5: модель USB-ответа за границей хранилища ===")
-    print(f"диск (MSC)      : {DISK_SECTORS} секторов = {DISK_BYTES // 1024} КиБ "
-          f"(граница param_2 < 0x800 в 0x10000354)")
-    print(f"хранилище       : {STORAGE_LEN // 1024} КиБ = {STORAGE_LEN // SECTOR} секторов (LBA 0..{STORAGE_LEN // SECTOR - 1})")
+    print("=== attack5: modeled USB reads beyond storage ===")
+    print(f"MSC disk        : {DISK_SECTORS} sectors = {DISK_BYTES // 1024} KiB "
+          f"(param_2 < 0x800 at 0x10000354)")
+    print(f"storage         : {STORAGE_LEN // 1024} KiB = {STORAGE_LEN // SECTOR} sectors (LBA 0..{STORAGE_LEN // SECTOR - 1})")
 
     # The first erased sector can precede the configured storage boundary
     first_ff = None
@@ -137,29 +137,29 @@ def main(argv):
             first_ff = lba
             break
     if first_ff is None:
-        print("[!] нет полностью стёртых секторов — дамп не похож на этот образ")
+        print("[!] no fully erased sectors; the dump does not match this image")
         return 2
-    print(f"\n[1] первый полностью стёртый сектор флеша: LBA {first_ff} (0x{first_ff:x})")
-    print(f"    граница выделенной области: LBA {outside_start}; "
-          f"LBA {first_ff}..{outside_start - 1} стёрты, но ещё ВНУТРИ неё")
-    print(f"    вне области и внутри MSC: LBA {outside_start}..{DISK_SECTORS - 1}")
+    print(f"\n[1] first fully erased flash sector: LBA {first_ff} (0x{first_ff:x})")
+    print(f"    storage boundary: LBA {outside_start}; "
+          f"LBA {first_ff}..{outside_start - 1} are erased but still within storage")
+    print(f"    beyond storage but within MSC: LBA {outside_start}..{DISK_SECTORS - 1}")
 
     # Show both the first erased sector and the configured boundary
-    print("\n[2] сравнение обслуживаемых данных (flash XOR гамма):")
+    print("\n[2] comparison of served data (flash XOR keystream):")
     for lba in (first_ff - 1, first_ff, outside_start, outside_start + 100, DISK_SECTORS - 1):
         off = STORAGE_OFF + lba * SECTOR
         flash = data[off:off + SECTOR]
         served = bytes(c ^ k for c, k in zip(flash, ks_sector(lba)))
         erased = all(b == 0xFF for b in flash)
         if lba < outside_start:
-            tag = "стёрт, но ВНУТРИ области" if erased else "внутри хранилища"
+            tag = "erased but within storage" if erased else "within storage"
         else:
-            tag = "вне области -> УТЕЧКА (~гамма)" if erased else "вне области, но не стёрт"
+            tag = "beyond storage -> keystream leak (~keystream)" if erased else "beyond storage, not erased"
         print(f"  LBA {lba:4d} (0x{lba:03x}): {tag}")
         print(f"    flash : {flash[:16].hex(' ')}")
-        print(f"    served: {served[:16].hex(' ')}  entropy={entropy(served):.3f} бит/байт")
+        print(f"    served: {served[:16].hex(' ')}  entropy={entropy(served):.3f} bits/byte")
 
-    print("\n[3] проверка модели на всех секторах за границей:")
+    print("\n[3] validate the model on every sector beyond storage:")
     ok = True
     leaked = 0
     exceptions = []
@@ -171,28 +171,28 @@ def main(argv):
             offset = (lba - outside_start) * SECTOR
             measured = tail_capture[offset:offset + SECTOR]
             if measured != served:
-                print(f"    FAIL — USB-ответ LBA {lba} отличается от модели сохранённого образа")
+                print(f"    FAIL: USB response at LBA {lba} differs from the stored image model")
                 return 1
         complement = bytes(0xFF ^ k for k in ks_sector(lba))
         if flash == b"\xff" * SECTOR:
             if served != complement or all(b == 0xFF for b in served):
-                print(f"    FAIL на LBA {lba}")
+                print(f"    FAIL at LBA {lba}")
                 ok = False
                 break
             leaked += 1
         else:
             exceptions.append(lba)
     if ok:
-        print(f"    OK — {leaked} стёртых секторов за границей отдаются ровно как ~гамма")
+        print(f"    OK: {leaked} erased sectors beyond storage return exactly ~keystream")
         if exceptions:
-            print(f"    исключения ({len(exceptions)} шт: {exceptions[:4]}...) — не стёрты, а содержат"
-                  f" зашифрованные нули (артефакт записи образа): served там = 0x00, в оракул не годятся")
+            print(f"    exceptions ({len(exceptions)}: {exceptions[:4]}...): not erased; they contain"
+                  " encrypted zeros from the source image; served bytes are 0x00 and cannot feed the oracle")
     total = leaked * SECTOR
-    print(f"    доступно {total} байт гаммы по модели USB-чтения")
+    print(f"    {total} keystream bytes available from modeled USB reads")
     if not ok:
         return 1
 
-    print("\n[4] восстановление только из USB-наблюдений (публичный словарь attack3):")
+    print("\n[4] recover from USB observations only (attack3 public dictionary):")
     if tail_capture is not None:
         ks_by_lba = decode_tail_response(tail_capture)
     else:
@@ -205,21 +205,21 @@ def main(argv):
                 ks_by_lba[lba] = bytes(0xFF ^ byte for byte in served)
     res = recover_generator_from_leak(ks_by_lba)
     if res is None:
-        print("    FAIL — генератор не восстановлен из утечки")
+        print("    FAIL: could not recover the generator from the leak")
         return 1
     A, seed, B, W = res
-    print(f"    B=0x{B:08X} W=0x{W:08X} A=0x{A:08X} seed=0x{seed:08X} (представитель класса)")
+    print(f"    B=0x{B:08X} W=0x{W:08X} A=0x{A:08X} seed=0x{seed:08X} (equivalent representative)")
 
-    print("\n[5] независимая проверка на зашифрованном томе из дампа:")
+    print("\n[5] independent check against the encrypted volume in the dump:")
     storage_ct = data[STORAGE_OFF:STORAGE_OFF + STORAGE_LEN]
     pt = R.decrypt_all(storage_ct, A, seed, B, W)
     zf_ok = R.volume_has_valid_zip(pt)
-    print(f"    сектор 0 -> {pt[:11].hex(' ')} ...  OEM={bytes(pt[3:11])!r}  boot sig={pt[510:512].hex(' ')}")
-    print(f"    валидный FAT12 boot: {R.strict_bootsector(pt[:SECTOR])};  CRC-валидный ZIP: {zf_ok}")
+    print(f"    sector 0 -> {pt[:11].hex(' ')} ...  OEM={bytes(pt[3:11])!r}  boot sig={pt[510:512].hex(' ')}")
+    print(f"    valid FAT12 boot: {R.strict_bootsector(pt[:SECTOR])};  CRC-valid ZIP: {zf_ok}")
     if not (R.strict_bootsector(pt[:SECTOR]) and zf_ok):
-        print("    FAIL — восстановленная гамма не расшифровала хранилище")
+        print("    FAIL: recovered keystream did not decrypt storage")
         return 1
-    print("    OK — параметры восстановлены без шифротекста; том подтвердил экстраполяцию")
+    print("    OK: recovered parameters without ciphertext; the volume confirms extrapolation")
     return 0
 
 

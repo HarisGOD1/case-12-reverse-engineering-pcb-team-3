@@ -1,31 +1,8 @@
-$ python3 -B attack2/src/evil_maid.py artifacts/backup_full.bin /tmp/opencode/forged-attack2.bin
 [*] recovering keystream from the cold dump (attack3 engine)...
     B=0x41C64E6D W=0x9E3779B1 A=0x38C9CDA0 seed=0x9E37A9B7
 [*] peeling 1337 layers and injecting the bomb into the final prize.html...
     depth=1337 layers; prize.html 352582 -> 375270 bytes (same markup + injected script)
-[*] wrote forged storage: /tmp/opencode/forged-attack2.bin (720896 bytes)
-[*] wrote forged full dump: /tmp/opencode/forged-attack2_fulldump.bin (2097152 bytes)
+[*] wrote forged storage: /tmp/forged_storage.bin (720896 bytes)
+[*] wrote forged full dump: /tmp/forged_storage_fulldump.bin (2097152 bytes)
     [verify] 1337 layers open with passwords 1..1337; final prize.html: bomb=True, original markup kept=True
 [PASS] offline decryption accepts the forged volume; layers and injected page remain readable (CWE-345)
-
-$ python3 -B attack2/src/test_matryoshka.py
-[ok]   test_falsification_wrong_password_scheme_breaks_unwrap
-[ok]   test_layers_are_really_encrypted
-[ok]   test_passwords_are_literally_the_layer_numbers
-[ok]   test_roundtrip_via_api_preserves_depth
-
-PASS: 4 unit tests, 0 failure(s)
-
-$ python3 -B attack2/src/test_bomb_html.py
-[ok]   test_inject_keeps_original_markup
-[ok]   test_no_anchor_still_injects
-[ok]   test_payload_is_silent
-[ok]   test_script_injected_before_body_close_after_content
-[ok]   test_seed_inflates_to_declared_size
-[ok]   test_seed_is_reproducible_across_build_times
-
-PASS: 6 unit tests, 0 failure(s)
-
-$ python3 attack2/src/browser_demo.py
-PASS: Chromium inflated the gzip seed, held two copies, and kept the visible heading
-The endless allocation loop and tab OOM were not run
