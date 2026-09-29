@@ -5,3 +5,12 @@ CLAUDE.local.md
 # Python
 __pycache__/
 *.pyc
+
+# Node-зависимости эмулятор-стенда — ставятся локально через npm/pnpm
+node_modules/
+
+# Локальная корзина
+.trash/
+
+# Настройки Obsidian — личные, per-machine
+.obsidian/
