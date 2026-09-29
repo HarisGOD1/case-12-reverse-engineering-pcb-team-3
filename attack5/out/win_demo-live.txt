@@ -1,0 +1,19 @@
+PS C:\Programming\Local\Python workspaces\Crypto workspace\hacking-project\attack5\src> python win_demo.py --volume D
+[*] reading erased tail (LBA 1408..2047) from \\.\D: ...
+    got 327680 bytes
+[*] reading live volume (LBA 0..1407) over USB ...
+    got 720896 bytes (the firmware already decrypted this)
+[*] cross-check: decrypt the build snapshot ..\..\artifacts\backup_full.bin
+observed erased tail sectors : 639
+recovery                     : OK (no dump, no firmware constant)
+    B    = 0x41C64E6D
+    W    = 0x9E3779B1
+    A    = 0x38C9CDA0
+    seed = 0x9E37A9E1
+full-volume keystream sha256 : 40507fec4cb7bffd75e30e7c59218c8a4e35f80f2fc5d5c1cf49cc23e59ccbfb
+live USB volume, already decrypted by firmware : valid (open FAT12)
+cold snapshot decrypted with the leaked keystream : FAT12 valid, ZIP CRC valid
+[*] decrypted snapshot written: storage_decrypted.img
+    open it with 7-Zip or `mdir` to reach your_prize.zip
+[*] the unlocked disk D: is already open FAT12 -- browse it directly for the files
+PS C:\Programming\Local\Python workspaces\Crypto workspace\hacking-project\attack5\src>
