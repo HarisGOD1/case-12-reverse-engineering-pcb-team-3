@@ -1,0 +1,39 @@
+
+=== A) FIRST-round CPA, random inputs ===
+truth: e1 3b 03 2e 11 2a 32 b5 79 08 0f 08 b1 f7 ed 4c
+rec  : e1 3b 03 2e 11 2a 32 b5 79 08 0f 08 b1 f7 ed 4c
+ok   :  V  V  V  V  V  V  V  V  V  V  V  V  V  V  V  V
+inVar: 256 256 256 256 256 256 256 256 256 256 256 256 256 256 256 256 (distinct input values per byte)
+recovered 16/16 bytes
+
+=== B) FIRST-round CPA, only nonce[15] varies ===
+truth: e1 3b 03 2e 11 2a 32 b5 79 08 0f 08 b1 f7 ed 4c
+rec  : 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 4c
+ok   :  x  x  x  x  x  x  x  x  x  x  x  x  x  x  x  V
+inVar:  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1 256 (distinct input values per byte)
+recovered 1/16 bytes
+
+=== C) LAST-round CPA on known keystream, only nonce[15] varies ===
+truth: 29 0b 89 d9 34 d3 e4 cd 5a c6 cb 90 bb 4f 56 17
+rec  : 29 0b 89 d9 34 d3 e4 cd 5a c6 cb 90 bb 4f 56 17
+ok   :  V  V  V  V  V  V  V  V  V  V  V  V  V  V  V  V
+inVar:  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1 256 (distinct input values per byte)
+recovered 16/16 bytes
+
+C') LAST-round with only 12 known outputs: 13/16 bytes of rk14
+
+=== TAKEAWAY ===
+A: random/known inputs -> full RK0. Pipeline valid.
+B: device reality (one IV per boot, only nonce[15] effectively varies at ~3122 blocks)
+   -> FIRST-round CPA gets ~2 bytes: the input is fixed, no correlation on frozen bytes.
+C: LAST-round CPA on the known keystream recovers ALL 16 bytes of RK14 even when only
+   nonce[15] varies -- AES avalanche makes the whole OUTPUT vary. THIS is the right method.
+   Then rk13 the same way (2nd-to-last round) -> invert the AES-256 key schedule
+   (rk13+rk14 = 8 words = full master key) -> verify with keystream[0] oracle
+   (iv0 = AES_dec(key, ks0), salt = iv0 ^ IV_public).
+Known-output requirement: keystream_k = CT_k XOR predicted PT_k. The app vector table is
+   predictable for ~12 blocks (base 0x20000000), giving enough known outputs.
+Note: "CPA on the key schedule" is NOT valid CPA -- with a fixed key setkey is
+   deterministic (zero variance across traces). That path is SPA/template profiling
+   (needs a clone with known keys), a fallback only if <~6 known output blocks exist.
+
