@@ -1,0 +1,28 @@
+PIN устройства RP2350 8295FF712987C1CA — вскрыт по расшифрованному приложению usb_token
+
+PIN          : 9451 (четыре цифры, ввод энкодером)
+Алгоритм     : SHA-256(ASCII(PIN, 4 байта) ‖ salt4)
+salt4        : 1dc51c18            (OTP page 48, строка 0xc08, 4 байта, little-endian)
+OTP-хеш      : eb0109e220cd9ea3550ce3196a3d0f6fcc0619ea0496986ef886790cf9adcf60
+               (OTP page 48, строка 0xc0a, 32 байта)
+Проверка     : sha256("9451" + 1dc51c18) = eb0109e2...  (перебор 0000-9999 даёт единственное совпадение)
+
+Disk seed    : 66c30d181a9ed068465eca6f023898e072b127abfed68b6c92109407735b15ba
+               (OTP page 49, строка 0xc40, 32 байта; строка "FATAL: disk seed OTP (page 49)")
+KDF диска    : SHA-256(disk_seed ‖ 4 байта из 0x2000c98c) -> 32-байтный ключ AES-256
+               (main 0x20000602-0x20000636, затем aes_setkey 0x200010d0)
+Секторы      : 512 байт, дешифровка в 0x2000108c; nonce строится из LBA в 0x2000106c,
+               блочный вызов 0x200076a8; стиль AES-256-CTR
+Носитель     : flash 0x10300000 + lba*512 (чтение в 0x20000270), 0x6600 байт = 51 сектор
+
+Lockout      : только в RAM — строки "auth: fresh state (RAM only)", "auth: locked for %u ms",
+               "auth: lockout expired"; сброс питания обнуляет счётчик (CWE-307)
+
+Адреса в образе (база 0x20000000):
+  main                0x2000050c
+  чтение OTP          0x2000051a-0x20000572 (salt 0xc08, hash 0xc0a, seed 0xc40)
+  ввод PIN и проверка  0x20000a0c
+  хеширование PIN      0x200008d8 (pico_sha256: init, update(pin,4), update(salt,4), finish)
+  memcmp 32 байта      0x20000bf6
+  печать PIN OK        "PIN OK" / "PIN FAIL (%u)"
+  старт USB MSC        "starting USB MSC"
