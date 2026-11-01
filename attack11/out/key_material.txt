@@ -1,0 +1,22 @@
+OTP RP2350 8295FF712987C1CA — материал ключа, снятый своим Secure-кодом
+
+AES-256 ключ     : 26efb69e8f543a0ea4db0523616a163233d3c9b7a6b5ec3a5fabdd2229ab91f8
+IV salt (OTP)    : 7a10f676118536a7207c1d5c226a15a0
+IV public (flash): 921e94597201e138c2747ca1e1bd1b0b
+iv0 = salt ^ IV  : e80e622f6384d79fe20861fdc3d70eab
+
+Источник (ECC-слова, little-endian):
+  page 29, строки 0x740-0x75f — 64 байта доли ключа
+  page 30, строки 0x780-0x78f — 64 байта доли ключа (слова 32-47)
+  page 31, строки 0x7c0-0x7c7 — 16 байт соли
+  средние 64 байта (page 29, строки 0x760-0x77f) — дыра FIB-обхода, в ключ не входят
+
+Шифртекст: flash 0x80024..0x8c344 (0xc320 байт), AES-256-CTR с XOR-счётчиком в последних 4 байтах nonce
+Проверка: открытый текст начинается с 00 20 08 20 97 01 00 20 1b 01 00 20 1d 01 00 20 и совпадает с утечкой по UART (attack8/out/decrypted_app_head.bin); picotool info -a на расшифрованном образе даёт hash: verified, signature: verified
+
+Дополнительно, page 48 (строки 0xc08-0xc17): 1dc51c18eb0109e220cd9ea3550ce3196a3d0f6fcc0619ea0496986ef886790c
+Дополнительно, page 49 (строки 0xc40-0xc4f): 66c30d181a9ed068465eca6f023898e072b127abfed68b6c92109407735b15ba
+
+Локи (снято из Secure-домена):
+  page 29, 30, 31, 48, 49 — word=0x3d00: SEC=ro, NSEC=inaccessible, BL=inaccessible
+  page 61 — rw, page 62 — 0x0400 (SEC=rw, NSEC=ro, BL=rw), page 63 — 0x1400 (BL=ro)
