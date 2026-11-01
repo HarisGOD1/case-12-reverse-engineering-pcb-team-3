@@ -1,0 +1,27 @@
+Скрытое хранилище RP2350 8295FF712987C1CA — расшифрованный том, снятый через USB MSC
+
+Снято командой (нужны права root на блочное устройство):
+  sudo dd if=/dev/sdb of=/tmp/storage.img bs=512 count=2048 status=none
+  python3 attack11/src/analyze_storage.py attack11/out/storage.img
+
+Вывод разбора:
+  size            : 1048576 bytes (2048 sectors)
+  oem             : MSDOS5.0
+  fs type         : FAT12
+  label           : NO NAME
+  serial          : 0xFC438E08 -> 8E08-FC43
+  geometry        : 512 B/sector, 1 sector/cluster, 4 reserved, 2 FATs, 6 sectors/FAT, 512 root entries
+  layout          : FAT 0x800, root 0x2000, data 0x6000, 2000 clusters
+  root            : [('dir', b'SYSTEM~1   ', 0)]
+  allocated       : 3 clusters [(2, '0xfff'), (3, '0xfff'), (4, '0xfff')]
+  cluster 2       : [('dir', b'.          ', 0), ('dir', b'..         ', 0), ('file', b'WPSETT~1DAT', 12), ('file', b'INDEXE~1   ', 76)]
+  byte census     : zero 29894, 0xFF 4134, other 1014548
+
+Удалённых записей (первый байт 0xE5) нет ни в корне, ни в System Volume Information
+Точка монтирования FC43-8E08 — это серийник тома 0xFC438E08 в обратном порядке, метки у тома нет
+Служебные файлы: WPSettings.dat (12 байт) и IndexerVolumeGuid (76 байт, {0527F4A7-F529-4E42-A957-D48C16E820D4}), даты 2026-10-09 16:59
+Занято три кластера из 2000; файлов пользователя нет
+
+Почему «other» почти мегабайт: на флеше записаны только первые 26112 байт тома (метаданные FAT и нули до 0x6600) и последний сектор LBA 2047 (флеш 0x3ffe00, расшифровывается в нули). Остальная часть области тома стёрта в 0xFF, а приложение расшифровывает каждый сектор, поэтому 0xFF превращается в псевдослучайные байты. FAT помечает эти кластеры свободными, и файловая система их не читает
+
+Последний сектор тома LBA 2047 — это тот самый «блоб 0x3ffe00» из отчёта второго этапа, назначение которого раньше было неизвестно
