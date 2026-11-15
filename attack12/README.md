@@ -56,6 +56,15 @@
 - Детекторы глитчей на устройстве разряжены, поэтому отсутствие сброса не служит доказательством стойкости
 - Отрицательный результат без сработавшего положительного контроля недействителен и помечается прямым текстом
 
+## Источники
+
+- Muench, Cullen, Courdesses, Roth, Zonenberg. Security through Transparency: Tales from the RP2350 Hacking Challenge. USENIX WOOT 2025 — https://www.usenix.org/system/files/woot25-muench.pdf
+- Raspberry Pi. PCN 28, RP235x A4 stepping — https://pip.raspberrypi.com/categories/1263-pcn/documents/RP-008771-CC/RP235x-A4-stepping-PCN.pdf
+- RP2350 Datasheet, приложения C и D — https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
+- Исходники boot ROM с тегами A2, A3 и A4 — https://github.com/raspberrypi/pico-bootrom-rp2350
+- Ledger Donjon. Photon-Emission-Guided Laser Fault Injection Enables RP2350 Secure Debug — https://donjon.ledger.com/blog/rp2350-secure-debug-laser-fault-injection/
+- AO3400, UCC27511 и Si2302CDS — даташиты производителей
+
 ## Повторение проверки цели
 
 ```sh
