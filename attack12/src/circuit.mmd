@@ -1,0 +1,46 @@
+%% Crowbar and gate-drive circuit of the attack12 stand.
+%% Render: mmdc -i circuit.mmd -o ../out/circuit.svg
+flowchart LR
+  subgraph U1["Атакующий RP2040 · U1"]
+    A4["площадка 4"]
+  end
+
+  subgraph DRV["Драйвер UCC27511 · SOT-23-6"]
+    INP["6 IN+"]
+    INM["5 IN−"]
+    VDD["1 VDD"]
+    OUTH["2 OUTH"]
+    OUTL["3 OUTL"]
+    DGND["4 GND"]
+  end
+
+  subgraph SW["Crowbar AO3400"]
+    G["затвор"]
+    DR["сток"]
+    SR["исток"]
+  end
+
+  subgraph U2["Цель RP2350 · U2"]
+    T5["5 В · площадка 23"]
+  end
+
+  P5["+5 В драйвера · отдельный источник"]
+  CAP["100 нФ ‖ 100 мкФ"]
+  R1["R1 · 3 Ом"]
+  R2["R2 · 2 Ом"]
+  RP["подтяжка 10 кОм"]
+  JP["перемычка вместо R3"]
+  GND(("GND · звезда у истока"))
+
+  A4 --> INP
+  INM --> GND
+  P5 --> VDD
+  CAP --- VDD
+  CAP --- GND
+  OUTH --> R1 --> G
+  OUTL --> R2 --> G
+  DGND --> GND
+  G --- RP
+  RP --> GND
+  SR --> GND
+  T5 --> JP --> DR
